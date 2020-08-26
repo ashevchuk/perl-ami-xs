@@ -1,0 +1,10 @@
+AMI.xs
+Changes
+Makefile.PL
+MANIFEST
+README
+t/00-ami-use.t
+t/00-bench.t
+lib/AMI.pm
+META.yml                                 Module YAML meta-data (added by MakeMaker)
+META.json                                Module JSON meta-data (added by MakeMaker)
