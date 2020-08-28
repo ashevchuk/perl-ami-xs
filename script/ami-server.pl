@@ -104,9 +104,12 @@ sub ami_send {
     my $response = as_packet(@fields);
 
     $hdl->push_write($response);
-    my ( $port, $host ) = Socket::unpack_sockaddr_in( getpeername( $hdl->fh ) );
-    print_packet( '>', Socket::inet_ntoa($host) . ":" . $port, @fields )
-      if DEBUG;
+
+    if ( my $peer = getpeername( $hdl->fh() ) ) {
+            my ( $port, $host ) = Socket::unpack_sockaddr_in( $peer );
+            print_packet( '>', Socket::inet_ntoa($host) . ":" . $port, @fields )
+              if DEBUG;
+    }
 }
 
 my $packet_size                = $ARGV[0] // 512;
@@ -114,6 +117,7 @@ my $events_interval            = $ARGV[1] // 1;
 my $events_regenerate_interval = $ARGV[2] // 1;
 
 my @event_packet;
+my %connections;
 
 my $events_regenerate_timer = AnyEvent->timer(
     (
@@ -171,7 +175,7 @@ AnyEvent::Socket::tcp_server(
                         print_packet( '<', "$host:$port", @request ) if DEBUG;
 
                         if ( exists {@request}->{Action} ) {
-                            if ( {@request}->{Action} eq "login" ) {
+                            if ( lc( {@request}->{Action} ) eq "login" ) {
                                 ami_send(
                                     $hdl,
                                     Response => 'Success',
@@ -194,7 +198,7 @@ AnyEvent::Socket::tcp_server(
                                     }
                                 );
                             }
-                            elsif ( {@request}->{Action} eq "Ping" ) {
+                            elsif ( lc( {@request}->{Action} ) eq "ping" ) {
                                 ami_send(
                                     $hdl,
                                     Response  => 'Success',
@@ -211,6 +215,7 @@ AnyEvent::Socket::tcp_server(
                                 );
                             }
                         }
+                        0;
                     }
                 );
             }

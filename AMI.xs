@@ -1,12 +1,16 @@
 #define PERL_NO_GET_CONTEXT
 
-#define MAX_BUFFER_SIZE 1024 * 1024 * 1024
+#define ALLOC_PAGE_SIZE sysconf(_SC_PAGESIZE)
+#define BUFFER_PAGES 1024
+#define BUFFER_SIZE ALLOC_PAGE_SIZE * BUFFER_PAGES
 
 #ifdef DEBUG
 #define trace(f_, ...) warn("%s:%-4d [%d] " f_, __FILE__, __LINE__, (int)getpid(), ##__VA_ARGS__)
 #else
 #define trace(...)
 #endif
+
+#include "EVAPI.h"
 
 #include "EXTERN.h"
 #include "perl.h"
@@ -22,10 +26,9 @@
 #include <netinet/tcp.h>
 #include <netdb.h>
 #include <stdint.h>
+#include <unistd.h>
 
-#include <pthread.h>
-
-#include "EVAPI.h"
+// #include <pthread.h>
 
 typedef struct
 {
@@ -38,21 +41,31 @@ typedef struct
 
 } RingBuffer;
 
-typedef struct AMIctx_ {
+typedef enum AMIerr_e { EAMI_NONE = 0, EAMI_FATAL, EAMI_UNKNOWN, EAMI_DESTROY } AMIerr;
 
-struct ev_io read_ev_io;
+typedef struct AMIctx_s {
+    struct ev_io * read_ev_io;
 
-struct ev_loop * loop;
+    struct ev_loop * loop;
 
-char * buffer;
-int buffer_len;
-int buffer_pos;
+    char * buffer;
+    char * buffer_head;
+    char * buffer_cursor;
 
-int portno;
-struct sockaddr_in serv_addr;
-struct hostent *server;
+    SV * event_callback;
 
-int sockfd;
+    uint64_t buffer_len;
+    uint64_t buffer_pos;
+    uint64_t buffer_free;
+
+    unsigned int portno;
+
+    struct sockaddr_in serv_addr;
+    struct hostent *server;
+
+    int sockfd;
+    bool error;
+    AMIerr error_code;
 } AMIctx;
 
 RingBuffer *ringBufferInit(int64_t size)
@@ -143,8 +156,11 @@ AMIctx * ami_ctx_init()
 {
   AMIctx * ami_ctx = (AMIctx *) malloc(sizeof(AMIctx));
 
-  ami_ctx->buffer = (char *) malloc(MAX_BUFFER_SIZE);
-  memset(ami_ctx->buffer, '\0', sizeof(ami_ctx->buffer));
+  ami_ctx->buffer = (char *) malloc(BUFFER_SIZE);
+  memset(ami_ctx->buffer, '\0', BUFFER_SIZE);
+
+  ami_ctx->buffer_head = ami_ctx->buffer;
+  ami_ctx->buffer_cursor = ami_ctx->buffer;
 
   ami_ctx->loop = EV_DEFAULT;
 
@@ -153,32 +169,43 @@ AMIctx * ami_ctx_init()
 
   ami_ctx->buffer_len = 0;
   ami_ctx->buffer_pos = 0;
+  ami_ctx->buffer_free = BUFFER_SIZE;
 
   ami_ctx->server = NULL;
 
+  ami_ctx->event_callback = NULL;
+  ami_ctx->read_ev_io = NULL;
+
   memset(&ami_ctx->serv_addr, '0', sizeof(ami_ctx->serv_addr));
+
+  ami_ctx->error = false;
+  ami_ctx->error_code = EAMI_NONE;
 
   return ami_ctx;
 }
 
-void ami_ctx_destroy (AMIctx * ami_ctx)
+void ami_ctx_set_error(AMIctx * ami_ctx, const AMIerr code, const char *message)
 {
-  if (ami_ctx != NULL) {
-    if (ami_ctx->buffer != NULL) {
-	free(ami_ctx->buffer);
-	ami_ctx->buffer = NULL;
-    }
-    if (ami_ctx->sockfd > 0) {
-	close(ami_ctx->sockfd);
-    }
-    free(ami_ctx);
-    ami_ctx = NULL;
+  trace("! AMI error: %s, code: %d\n", message, (uint8_t)code);
+
+  if (ami_ctx) {
+	ami_ctx->error = true;
+	ami_ctx->error_code = code;
   }
 }
 
+bool ami_ctx_is_error(AMIctx * ami_ctx)
+{
+  if (ami_ctx) {
+	return ami_ctx->error;
+  }
+  return true;
+}
+
+
 int ami_ctx_host(AMIctx * ami_ctx, const char * host, const char * port)
 {
-  if (ami_ctx != NULL) {
+  if (ami_ctx) {
 	ami_ctx->serv_addr.sin_family = AF_INET;
 
 	ami_ctx->portno = atoi(port);
@@ -187,7 +214,7 @@ int ami_ctx_host(AMIctx * ami_ctx, const char * host, const char * port)
 	ami_ctx->server = gethostbyname(host);
 
 	if (ami_ctx->server == NULL) {
-		fprintf(stderr,"ERROR, no such host\n");
+		trace("ERROR, no such host\n");
 		return -1;
 	}
 
@@ -196,46 +223,213 @@ int ami_ctx_host(AMIctx * ami_ctx, const char * host, const char * port)
   return 0;
 }
 
+uint64_t ami_ctx_scan_packet_end( AMIctx * ami_ctx )
+{
+  if (ami_ctx != NULL) {
+    register const char *cursor = ami_ctx->buffer_head;
+    register uint64_t i = 0;
+    register bool found = false;
+    for (register uint64_t i = 0; i < ami_ctx->buffer_len; i++) {
+	trace("scan i: %d\n", i);
+	found = (bool)((*cursor == '\n') && (*(cursor + 1) == '\r'));
+	if (found) {
+	    trace("scan found i: %d\n", i);
+	    return (i + 3);
+	}
+	cursor++;
+    }
+  }
+  return 0;
+}
+
+void ami_ctx_invoke_event_callback(AMIctx * ami_ctx)
+{
+  if (ami_ctx != NULL) {
+
+    int index = 42;
+
+    dTHX;
+    dSP;
+
+    if (ami_ctx->event_callback != NULL) {
+
+//    trace("event callback cb=%p\n", ami_ctx->event_callback);
+
+    ENTER;
+    SAVETMPS;
+
+    PUSHMARK(SP);
+    PUSHs(sv_2mortal(newSViv(index)));
+    PUTBACK;
+
+    call_sv(ami_ctx->event_callback, G_DISCARD | G_EVAL|G_VOID);
+
+    SPAGAIN;
+
+//    trace("event callback err: %d\n", SvTRUE(ERRSV) ? 1 : 0);
+
+    PUTBACK;
+
+    FREETMPS;
+    LEAVE;
+    }
+  }
+}
+
+void ami_ctx_set_event_callback(AMIctx * ami_ctx, SV * event_callback)
+{
+  if (ami_ctx != NULL) {
+    if (event_callback != NULL) {
+	dTHX;
+	if ((SvROK(event_callback) && SvTYPE(SvRV(event_callback)) == SVt_PVCV)) {
+		if (ami_ctx->event_callback) {
+			SvREFCNT_dec(ami_ctx->event_callback);
+		}
+		ami_ctx->event_callback = newSVsv(event_callback);
+	}
+    }
+  }
+}
+
+int ami_ctx_stop_events(AMIctx * ami_ctx)
+{
+  if (ami_ctx) {
+	trace("ami_ctx_stop_events begin ctx: %p\n", ami_ctx);
+	trace("ami_ctx_stop_events destroy read_ev_io: %p\n", ami_ctx->read_ev_io);
+	if (ami_ctx->read_ev_io) {
+		trace("ami_ctx_stop_events destroy defined read_ev_io: %p\n", ami_ctx->read_ev_io);
+		ami_ctx->read_ev_io->data = NULL;
+
+		if (ev_is_active(ami_ctx->read_ev_io)) {
+			trace("ami_ctx_stop_events stop read_ev_io\n");
+			ev_io_stop(ami_ctx->loop, ami_ctx->read_ev_io);
+		}
+		trace("ami_ctx_stop_events free read_ev_io\n");
+		free(ami_ctx->read_ev_io);
+		ami_ctx->read_ev_io = NULL;
+	}
+  }
+  trace("ami_ctx_stop_events end\n");
+  return 0;
+}
+
+
+int ami_ctx_disconnect(AMIctx * ami_ctx)
+{
+  if (ami_ctx != NULL) {
+    if (ami_ctx->sockfd > 0) {
+	fcntl(ami_ctx->sockfd, F_SETFL, 0);
+
+	if (shutdown(ami_ctx->sockfd, SHUT_RDWR) == -1) {
+		return ami_ctx->sockfd = -1;
+	}
+
+	if (close(ami_ctx->sockfd) == -1) {
+		return ami_ctx->sockfd = -1;
+	}
+
+	ami_ctx->sockfd = -1;
+    }
+  }
+  return 0;
+}
+
+
 static void
 ami_ctx_ev_read_cb (struct ev_loop *loop, ev_io *w, int revents)
 {
     AMIctx * ami_ctx = (AMIctx *)w->data;
 
-    if (ami_ctx != NULL) {
-	int n = -1;
+    if (ami_ctx) {
+	if (revents & EV_ERROR && !(revents & EV_READ)) {
+		trace("EV error on read, fd=%d revents=0x%08x\n", ami_ctx->sockfd, revents);
+		(void)ami_ctx_stop_events(ami_ctx);
+		(void)ami_ctx_disconnect(ami_ctx);
+		return;
+	}
 
-//	memset(ami_ctx->buffer, '\0', sizeof(ami_ctx->buffer));
+	size_t n = 0;
 
-	n = read(ami_ctx->sockfd, ami_ctx->buffer, sizeof(ami_ctx->buffer));
+//	memset(ami_ctx->buffer, '\0', BUFFER_SIZE);
 
-	if (n > 0) {
-	    ami_ctx->buffer_len = n;
-	    ami_ctx->buffer_pos = 0;
-	} else {
-	     fprintf(stderr,"ERROR reading from socket\n");
+	l_read:
+	n = read(ami_ctx->sockfd, ami_ctx->buffer_cursor, ami_ctx->buffer_free);
+
+	if (n <= 0) {
+		if (n == 0) {
+			trace("EOF detected in fd: %d\n", ami_ctx->sockfd);
+			(void)ami_ctx_stop_events(ami_ctx);
+			(void)ami_ctx_disconnect(ami_ctx);
+			return;
+		}
+
+		if (errno == EAGAIN || errno == EINTR) {
+			trace("EAGAIN detected in fd: %d, status: %d \n", ami_ctx->sockfd, errno);
+			goto l_read;
+		}
+	}
+	else if (n > 0) {
+	    trace("read AMI data fd %d, len: %d\n", ami_ctx->sockfd, n);
+
+	    char *read_data = strndup(ami_ctx->buffer_cursor, n);
+	    trace("read AMI data:\n|%s|\n", read_data);
+	    free(read_data);
+
+	    ami_ctx->buffer_len += n;
+	    ami_ctx->buffer_cursor = ami_ctx->buffer_head + ami_ctx->buffer_len;
+	    ami_ctx->buffer_pos = (int)(ami_ctx->buffer_cursor - ami_ctx->buffer_head);
+	    ami_ctx->buffer_free = BUFFER_SIZE - ami_ctx->buffer_pos;
+
+	    trace("new AMI buffer len: %d\n", ami_ctx->buffer_len);
+
+	    uint64_t found = 0;
+
+	    while((found = ami_ctx_scan_packet_end(ami_ctx))) {
+		trace("found AMI packet end at: %d\n", found);
+
+		char *found_packet = strndup(ami_ctx->buffer_head, found);
+		trace("found AMI packet: %s\n", found_packet);
+
+//		ami_ctx_invoke_event_callback(ami_ctx);
+
+		free(found_packet);
+
+		if (ami_ctx->buffer_len > found) { // residual data
+			trace("residual AMI buffer len: %d\n", ami_ctx->buffer_len);
+
+			memmove(ami_ctx->buffer_head, ami_ctx->buffer_head + found, ami_ctx->buffer_len - found);
+
+			ami_ctx->buffer_len -= found;
+			ami_ctx->buffer_cursor = ami_ctx->buffer_head + ami_ctx->buffer_len;
+			ami_ctx->buffer_pos = (int)(ami_ctx->buffer_cursor - ami_ctx->buffer_head);
+			ami_ctx->buffer_free = BUFFER_SIZE - ami_ctx->buffer_pos;
+		} else {
+			trace("no residual AMI data. clear buffer\n");
+
+			ami_ctx->buffer_len = 0;
+			ami_ctx->buffer_cursor = ami_ctx->buffer_head;
+			ami_ctx->buffer_pos = 0;
+			ami_ctx->buffer_free = BUFFER_SIZE;
+		}
+	    }
 	}
     }
+
+//    trace("done reading from socket\n");
 }
 
 int ami_ctx_setup_events(AMIctx * ami_ctx)
 {
   if (ami_ctx != NULL) {
 	if (ami_ctx->sockfd > 0) {
-	    ev_io_init(&(ami_ctx->read_ev_io), ami_ctx_ev_read_cb, ami_ctx->sockfd, EV_READ);
-	    ami_ctx->read_ev_io.data = (void *)ami_ctx;
-	    ev_io_start(ami_ctx->loop, &(ami_ctx->read_ev_io));
+		if (ami_ctx->read_ev_io == NULL) {
+			ami_ctx->read_ev_io = (struct ev_io *)malloc(sizeof(struct ev_io));
+			ev_io_init(ami_ctx->read_ev_io, ami_ctx_ev_read_cb, ami_ctx->sockfd, EV_READ);
+			ami_ctx->read_ev_io->data = (void *)ami_ctx;
+			ev_io_start(ami_ctx->loop, ami_ctx->read_ev_io);
+		}
 	} else {
 	    return -1;
-	}
-  }
-  return 0;
-}
-
-int ami_ctx_stop_events(AMIctx * ami_ctx)
-{
-  if (ami_ctx != NULL) {
-	if (ev_is_active(&(ami_ctx->read_ev_io))) {
-	    ev_io_stop(ami_ctx->loop, &(ami_ctx->read_ev_io));
 	}
   }
   return 0;
@@ -250,58 +444,52 @@ int ami_ctx_connect(AMIctx * ami_ctx)
 	ami_ctx->sockfd = socket(AF_INET, SOCK_STREAM, 0);
 
 	if (ami_ctx->sockfd < 0) {
-		fprintf(stderr,"ERROR opening socket\n");
-		return -1;
+		trace("ERROR opening socket\n");
+		return ami_ctx->sockfd = -1;
 	}
 
 	if (connect(ami_ctx->sockfd, (struct sockaddr *)&(ami_ctx->serv_addr), sizeof(ami_ctx->serv_addr)) < 0) {
-		fprintf(stderr,"ERROR connecting\n");
+		trace("ERROR connecting\n");
 		close(ami_ctx->sockfd);
-		return -1;
+		return ami_ctx->sockfd = -1;
 	}
+
+	char *banner = (char *)malloc(255); // "Asterisk Call Manager/2.10.4\r\n"
+
+	int n = -1;
+
+	memset(banner, '\0', 255);
+
+	n = read(ami_ctx->sockfd, banner, 254);
+
+	trace("read AMI data len: %d\n", n);
+
+	trace("read AMI banner: %s\n", banner);
+
+	free(banner);
 
 	flags = O_NONBLOCK;
 	if (fcntl(ami_ctx->sockfd, F_SETFL, flags) < 0) {
 		close(ami_ctx->sockfd);
-		return -1;
+		return ami_ctx->sockfd = -1;
 	}
 
 	flags = 1;
 	if (setsockopt(ami_ctx->sockfd, SOL_TCP, TCP_NODELAY, &flags, sizeof(int))) {
 		close(ami_ctx->sockfd);
-		return -1;
+		return ami_ctx->sockfd = -1;
 	}
 
 	flags = 1;
 	if (setsockopt(ami_ctx->sockfd, SOL_SOCKET, SO_OOBINLINE, &flags, sizeof(int))) {
 		close(ami_ctx->sockfd);
-		return -1;
+		return ami_ctx->sockfd = -1;
         }
 
 	if (setsockopt(ami_ctx->sockfd, SOL_SOCKET, SO_LINGER, &linger, sizeof(linger))) {
 		close(ami_ctx->sockfd);
-		return -1;
+		return ami_ctx->sockfd = -1;
         }
-  }
-  return 0;
-}
-
-int ami_ctx_disconnect(AMIctx * ami_ctx)
-{
-  if (ami_ctx != NULL) {
-    if (ami_ctx->sockfd > 0) {
-	fcntl(ami_ctx->sockfd, F_SETFL, 0);
-
-	if (shutdown(ami_ctx->sockfd, SHUT_RDWR) == -1) {
-		return -1;
-	}
-
-	if (close(ami_ctx->sockfd) == -1) {
-		return -1;
-	}
-
-	ami_ctx->sockfd = -1;
-    }
   }
   return 0;
 }
@@ -312,6 +500,18 @@ int ami_ctx_fd(AMIctx * ami_ctx)
 	return ami_ctx->sockfd;
   }
   return -1;
+}
+
+int ami_ctx_write(AMIctx * ami_ctx, const char * packet)
+{
+  if (ami_ctx != NULL) {
+    if (ami_ctx->sockfd > 0) {
+	int n = 0;
+	n = write(ami_ctx->sockfd, packet, strlen(packet));
+	return n;
+    }
+  }
+  return 0;
 }
 
 struct ev_loop * ami_ctx_loop(AMIctx * ami_ctx, struct ev_loop * loop)
@@ -325,6 +525,44 @@ struct ev_loop * ami_ctx_loop(AMIctx * ami_ctx, struct ev_loop * loop)
   }
 
   return NULL;
+}
+
+void ami_ctx_destroy (AMIctx * ami_ctx)
+{
+  if (ami_ctx) {
+    trace("ami_ctx_destroy begin\n");
+
+    (void)ami_ctx_stop_events(ami_ctx);
+    trace("ami_ctx_stop_event\n");
+
+    (void)ami_ctx_disconnect(ami_ctx);
+    trace("ami_ctx_disconnect\n");
+
+    if (ami_ctx->buffer != NULL) {
+        trace("ami_ctx_destroy free buffer\n");
+	free(ami_ctx->buffer);
+	ami_ctx->buffer = NULL;
+    }
+    if (ami_ctx->sockfd > 0) {
+        trace("ami_ctx_destroy close sockfd\n");
+	close(ami_ctx->sockfd);
+	ami_ctx->sockfd = -1;
+    }
+    if (ami_ctx->event_callback) {
+        trace("ami_ctx_destroy destroy callback\n");
+	dTHX;
+	SvREFCNT_dec(ami_ctx->event_callback);
+        ami_ctx->event_callback = NULL;
+        trace("ami_ctx_destroy after destroy callback\n");
+    }
+    trace("ami_ctx_destroy main free\n");
+    ami_ctx->error = true;
+    ami_ctx->error_code = EAMI_DESTROY;
+
+    free(ami_ctx);
+    ami_ctx = NULL;
+  }
+  trace("ami_ctx_destroy done\n");
 }
 
 int mk_connect(const char * host, const char * port, SV * cb)
@@ -348,6 +586,7 @@ int mk_connect(const char * host, const char * port, SV * cb)
 
     SPAGAIN;
 
+    trace("page size: %d\n", sysconf(_SC_PAGESIZE));
     trace("called mk_connect callback, errsv? %d\n", SvTRUE(ERRSV) ? 1 : 0);
 
     PUTBACK;
@@ -396,7 +635,7 @@ int mk_connect(const char * host, const char * port, SV * cb)
 
 	memset(buffer, '\0', sizeof(buffer));
 
-	n = read(sockfd,buffer,255);
+	n = read(sockfd,buffer,sizeof(buffer)-1);
 
 	if (n < 0)
 		 fprintf(stderr,"ERROR reading from socket\n");
@@ -410,6 +649,8 @@ int mk_connect(const char * host, const char * port, SV * cb)
 	if (ret == -1) {
 		return -1;
 	}
+
+	trace("recv: %s\n", buffer);
 
 
 	return 0;
@@ -534,12 +775,13 @@ size_t amiheader_find(AMIPacket *pack,
 int amipack_scan( char *p, size_t len )
 {
     int i = 0, found = 0;
-    while(i < len && !found){
+    while(i < len-3 && !found){
 	found = (p[i] == '\r' && p[i+1] == '\n' && p[i+2] =='\r' && p[i+3] == '\n');
 	i++;
     }
     return found ? i + 3 : 0;
 }
+
 
 int amipack_feed(char *p, size_t plen)
 {
@@ -555,7 +797,9 @@ int amipack_feed(char *p, size_t plen)
 //	AMIPacket *ami_pack = amipack_parse(buf, NULL, plen);
 
 //      for (AMIHeader *hdr = ami_pack->head; hdr; hdr = hdr->next) {
+//        json_printf(&out, "%Q: %Q", hdr->name, hdr->value);
 //        if (hdr != ami_pack->tail) {
+//          json_printf(&out, ",");
 //        }
 //      }
 //	if (ami_pack) amipack_destroy(ami_pack);
@@ -775,8 +1019,24 @@ size_t amipack_fields_count(const char * packet) {
 	return count;
 }
 
+MODULE = AMI		PACKAGE = AMIctxPtr  PREFIX = AMIctx_
+
+void
+AMIctx_DESTROY(ami_ctx)
+        AMIctx *ami_ctx
+	CODE:
+		printf("AMIctxPtr::DESTROY\n");
+        	ami_ctx_destroy(ami_ctx);
+        	ami_ctx = NULL;
+
+
 MODULE = AMI		PACKAGE = AMI
-PROTOTYPES: ENABLE
+PROTOTYPES: DISABLE
+
+BOOT:
+	{
+		I_EV_API("AMI");
+        }
 
 int
 try_connect(IN host, IN port, IN cb)
@@ -791,10 +1051,60 @@ try_connect(IN host, IN port, IN cb)
 	OUTPUT:
 		RETVAL
 
-size_t
-fields_count(IN packet)
+AMIctx * 
+ami_connect(IN loop, IN host, IN port, IN event_callback)
+	struct ev_loop * loop
+	const char * host
+	const char * port
+	SV * event_callback
+	INIT:
+		AMIctx * ami_ctx = ami_ctx_init();
+	CODE:
+		(void)ami_ctx_loop(ami_ctx, loop);
+		(void)ami_ctx_host(ami_ctx, host, port);
+		if (ami_ctx_connect(ami_ctx) > -1) {
+		    (void)ami_ctx_setup_events(ami_ctx);
+		    ami_ctx_set_event_callback(ami_ctx, event_callback);
+		} else {
+		}
+
+		RETVAL = ami_ctx;
+	OUTPUT:
+		RETVAL
+
+int
+ami_fd(IN ami_ctx)
+	AMIctx * ami_ctx
+	INIT:
+		int fd = -1;
+	CODE:
+		fd = ami_ctx_fd(ami_ctx);
+		RETVAL = fd;
+	OUTPUT:
+		RETVAL
+
+int
+ami_write(IN ami_ctx, IN packet)
+	AMIctx * ami_ctx
 	const char * packet
-	PREINIT:
+	INIT:
+		int n = -1;
+	CODE:
+		n = ami_ctx_write(ami_ctx, packet);
+		RETVAL = n;
+	OUTPUT:
+		RETVAL
+
+void 
+ami_disconnect(IN ami_ctx)
+	AMIctx * ami_ctx
+	CODE:
+		ami_ctx_destroy(ami_ctx);
+
+size_t
+fields_count_s(IN packet)
+	const char * packet
+	INIT:
 		register const char *cursor = packet;
 		register size_t count = 0;
 	CODE:
@@ -802,6 +1112,38 @@ fields_count(IN packet)
 			if (*cursor++ == '\n') count++;
 		}
 		count && count--;
+		RETVAL = count;
+	OUTPUT:
+		RETVAL
+
+size_t
+fields_count(IN packet)
+	const char * packet
+	INIT:
+		register const char *cursor = packet;
+		register const char *ch = cursor;
+		register const char *prev_ch = ch;
+
+		register size_t count = 0;
+
+		register bool process = true;
+	CODE:
+		while (process) {
+			if (*ch == '\r') {
+				if (*prev_ch == '\n') {
+					process = false;
+					break;
+				} else {
+					count++;
+				}
+			} else if(*ch == '\0') {
+					process = false;
+					break;
+			}
+			prev_ch = ch;
+			ch = cursor++;
+		}
+
 		RETVAL = count;
 	OUTPUT:
 		RETVAL
@@ -819,7 +1161,7 @@ to_packet(IN packet)
 	#//	    rh = (HV *)sv_2mortal((SV *)newHV());
 			rh = newHV();
 			for (AMIHeader *hdr = ami_pack->head; hdr; hdr = hdr->next) {
-			hv_store(rh, hdr->name, hdr->name_size, newSVpvn(hdr->value, hdr->value_size), 0);
+			(void)hv_store(rh, hdr->name, hdr->name_size, newSVpvn(hdr->value, hdr->value_size), 0);
 			}
 			amipack_destroy(ami_pack);
 		}
@@ -1010,7 +1352,7 @@ to_packet_o(IN packet)
 			v1 = yyt3;
 			v2 = cursor - 2;
 			{
-			  hv_store(rh, f1, (int)(f2 - f1), newSVpvn(v1, (int)(v2 - v1)), 0);
+			  (void)hv_store(rh, f1, (int)(f2 - f1), newSVpvn(v1, (int)(v2 - v1)), 0);
 			  continue;
 			}
 		}
@@ -1136,7 +1478,7 @@ to_packet_oos(IN packet)
 			v1 = yyt3;
 			v2 = cursor - 2;
 			{
-			  hv_store(rh, f1, (int)(f2 - f1), newSVpvn(v1, (int)(v2 - v1)), 0);
+			  (void)hv_store(rh, f1, (int)(f2 - f1), newSVpvn(v1, (int)(v2 - v1)), 0);
 			  continue;
 			}
 		}
@@ -1438,7 +1780,7 @@ to_packet_ooo(IN packet)
 			v1 = yyt3;
 			v2 = cursor - 2;
 			{
-			  hv_store(rh, f1, (int)(f2 - f1), newSVpvn(v1, (int)(v2 - v1)), 0);
+			  (void)hv_store(rh, f1, (int)(f2 - f1), newSVpvn(v1, (int)(v2 - v1)), 0);
 			  goto loop;
 			}
 		}
@@ -1479,7 +1821,7 @@ to_packet_oo(IN packet)
 					process = false;
 				} else {
 					end_value = cursor - 1;
-					hv_store((HV *)rh, (const char *)start_field, (int)((const char *)end_field - (const char *)start_field), newSVpvn((const char *)start_value, (int)((const char *)end_value - (const char *)start_value)), 0);
+					(void)hv_store((HV *)rh, (const char *)start_field, (int)((const char *)end_field - (const char *)start_field), newSVpvn((const char *)start_value, (int)((const char *)end_value - (const char *)start_value)), 0);
 				}
 				break;
 			case '\n':

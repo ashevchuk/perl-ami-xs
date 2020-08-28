@@ -3,6 +3,8 @@ package AMI;
 use strict;
 use warnings;
 
+use EV ();
+
 require Exporter;
 use AutoLoader;
 
@@ -21,6 +23,9 @@ our %EXPORT_TAGS = ( 'all' => [ qw(
 	to_packet_oo
 	fields_count
 	try_connect
+	ami_connect
+	ami_write
+	ami_disconnect
 ) ] );
 
 our @EXPORT_OK = ( @{ $EXPORT_TAGS{'all'} } );
@@ -51,7 +56,7 @@ AMI - Perl extension for blah blah blah
 
 =head1 DESCRIPTION
 
-Stub documentation for AMI. It looks like the
+Stub documentation for AMI, created by h2xs. It looks like the
 author of the extension was negligent enough to leave the stub
 unedited.
 
@@ -77,11 +82,11 @@ If you have a web site set up for your module, mention it here.
 
 =head1 AUTHOR
 
-user, E<lt>user@localdomainE<gt>
+root, E<lt>root@localdomainE<gt>
 
 =head1 COPYRIGHT AND LICENSE
 
-Copyright (C) 2020 by user
+Copyright (C) 2020 by root
 
 This library is free software; you can redistribute it and/or modify
 it under the same terms as Perl itself, either Perl version 5.10.1 or,
