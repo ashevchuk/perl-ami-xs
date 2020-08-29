@@ -223,6 +223,197 @@ int ami_ctx_host(AMIctx * ami_ctx, const char * host, const char * port)
   return 0;
 }
 
+SV * ami_ctx_parse(AMIctx * ami_ctx)
+{
+  if (ami_ctx) {
+		dTHX;
+    		HV * rh = newHV();
+    		const char *packet = ami_ctx->buffer_head;
+		const char *cursor = packet;
+		const char *f1;
+		const char *f2;
+		const char *v1;
+		const char *v2;
+		const char *yyt1;
+		const char *yyt2;
+		const char *yyt3;
+		char yych;
+
+			static const unsigned char yybm[] = {
+				128, 128, 128, 128, 128, 128, 128, 128,
+				128, 160, 128, 128, 128,   0, 128, 128,
+				128, 128, 128, 128, 128, 128, 128, 128,
+				128, 128, 128, 128, 128, 128, 128, 128,
+				160, 128, 128, 128, 128, 128, 128, 128,
+				128, 128, 128, 128, 128, 192, 192, 128,
+				192, 192, 192, 192, 192, 192, 192, 192,
+				192, 192, 128, 128, 128, 128, 128, 128,
+				128, 192, 192, 192, 192, 192, 192, 192,
+				192, 192, 192, 192, 192, 192, 192, 192,
+				192, 192, 192, 192, 192, 192, 192, 192,
+				192, 192, 192, 128, 128, 128, 128, 192,
+				128, 192, 192, 192, 192, 192, 192, 192,
+				192, 192, 192, 192, 192, 192, 192, 192,
+				192, 192, 192, 192, 192, 192, 192, 192,
+				192, 192, 192, 128, 128, 128, 128, 128,
+				128, 128, 128, 128, 128, 128, 128, 128,
+				128, 128, 128, 128, 128, 128, 128, 128,
+				128, 128, 128, 128, 128, 128, 128, 128,
+				128, 128, 128, 128, 128, 128, 128, 128,
+				128, 128, 128, 128, 128, 128, 128, 128,
+				128, 128, 128, 128, 128, 128, 128, 128,
+				128, 128, 128, 128, 128, 128, 128, 128,
+				128, 128, 128, 128, 128, 128, 128, 128,
+				128, 128, 128, 128, 128, 128, 128, 128,
+				128, 128, 128, 128, 128, 128, 128, 128,
+				128, 128, 128, 128, 128, 128, 128, 128,
+				128, 128, 128, 128, 128, 128, 128, 128,
+				128, 128, 128, 128, 128, 128, 128, 128,
+				128, 128, 128, 128, 128, 128, 128, 128,
+				128, 128, 128, 128, 128, 128, 128, 128,
+				128, 128, 128, 128, 128, 128, 128, 128,
+			};
+
+				static void *yytarget[256] = {
+					&&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,
+					&&yy3,  &&yy12, &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,
+					&&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,
+					&&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,
+					&&yy12, &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,
+					&&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy12, &&yy12, &&yy3,
+					&&yy12, &&yy12, &&yy12, &&yy12, &&yy12, &&yy12, &&yy12, &&yy12,
+					&&yy12, &&yy12, &&yy12, &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,
+					&&yy3,  &&yy12, &&yy12, &&yy12, &&yy12, &&yy12, &&yy12, &&yy12,
+					&&yy12, &&yy12, &&yy12, &&yy12, &&yy12, &&yy12, &&yy12, &&yy12,
+					&&yy12, &&yy12, &&yy12, &&yy12, &&yy12, &&yy12, &&yy12, &&yy12,
+					&&yy12, &&yy12, &&yy12, &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy12,
+					&&yy3,  &&yy12, &&yy12, &&yy12, &&yy12, &&yy12, &&yy12, &&yy12,
+					&&yy12, &&yy12, &&yy12, &&yy12, &&yy12, &&yy12, &&yy12, &&yy12,
+					&&yy12, &&yy12, &&yy12, &&yy12, &&yy12, &&yy12, &&yy12, &&yy12,
+					&&yy12, &&yy12, &&yy12, &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,
+					&&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,
+					&&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,
+					&&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,
+					&&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,
+					&&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,
+					&&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,
+					&&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,
+					&&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,
+					&&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,
+					&&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,
+					&&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,
+					&&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,
+					&&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,
+					&&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,
+					&&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,
+					&&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3
+				};
+		while (cursor != ami_ctx->buffer_cursor + 1) {
+			yych = *cursor;
+			if (yych <= '9') {
+				if (yych <= ',') {
+					if (yych == '\r') goto yy4;
+				} else {
+					if (yych != '/') {
+						yyt1 = cursor;
+						goto yy5;
+					}
+				}
+			} else {
+				if (yych <= '^') {
+					if (yych <= '@') goto yy2;
+					if (yych <= 'Z') {
+						yyt1 = cursor;
+						goto yy5;
+					}
+				} else {
+					if (yych == '`') goto yy2;
+					if (yych <= 'z') {
+						yyt1 = cursor;
+						goto yy5;
+					}
+				}
+			}
+		yy2:
+			++cursor;
+		yy3:
+			{
+			break;
+			}
+		yy4:
+			yych = *++cursor;
+			if (yych == '\n') goto yy6;
+			goto yy3;
+		yy5:
+			yych = *(packet = ++cursor);
+			{
+				goto *yytarget[yych];
+			}
+		yy6:
+			++cursor;
+			{ break; }
+		yy8:
+			yych = *++cursor;
+			if (yybm[0+yych] & 32) {
+				goto yy8;
+			}
+			if (yych == ':') goto yy13;
+		yy10:
+			cursor = packet;
+			goto yy3;
+		yy11:
+			yych = *++cursor;
+		yy12:
+			if (yybm[0+yych] & 64) {
+				goto yy11;
+			}
+			if (yych <= 0x1F) {
+				goto yy10;
+			} else {
+				if (yych <= ' ') {
+					yyt2 = cursor;
+					goto yy8;
+				}
+				if (yych <= '/') goto yy10;
+				if (yych >= ';') goto yy10;
+				yyt2 = cursor;
+			}
+		yy13:
+			yych = *++cursor;
+			if (yych <= '\f') {
+				yyt3 = cursor;
+			} else {
+				if (yych <= '\r') {
+					yyt3 = cursor;
+					goto yy17;
+				}
+				if (yych == ' ') goto yy13;
+				yyt3 = cursor;
+			}
+		yy15:
+			yych = *++cursor;
+			if (yybm[0+yych] & 128) {
+				goto yy15;
+			}
+		yy17:
+			yych = *++cursor;
+			if (yych != '\n') goto yy10;
+			++cursor;
+			f1 = yyt1;
+			f2 = yyt2;
+			v1 = yyt3;
+			v2 = cursor - 2;
+			{
+			  (void)hv_store(rh, f1, (int)(f2 - f1), newSVpvn(v1, (int)(v2 - v1)), 0);
+			  continue;
+			}
+		}
+	return newRV_noinc((SV *)rh);
+    }
+
+    return NULL;
+}
+
 uint64_t ami_ctx_scan_packet_end( AMIctx * ami_ctx )
 {
   if (ami_ctx != NULL) {
@@ -230,10 +421,9 @@ uint64_t ami_ctx_scan_packet_end( AMIctx * ami_ctx )
     register uint64_t i = 0;
     register bool found = false;
     for (register uint64_t i = 0; i < ami_ctx->buffer_len; i++) {
-	trace("scan i: %d\n", i);
 	found = (bool)((*cursor == '\n') && (*(cursor + 1) == '\r'));
 	if (found) {
-	    trace("scan found i: %d\n", i);
+//	    trace("scan found i: %d\n", i);
 	    return (i + 3);
 	}
 	cursor++;
@@ -242,7 +432,7 @@ uint64_t ami_ctx_scan_packet_end( AMIctx * ami_ctx )
   return 0;
 }
 
-void ami_ctx_invoke_event_callback(AMIctx * ami_ctx)
+void ami_ctx_invoke_event_callback(AMIctx * ami_ctx, SV * packet)
 {
   if (ami_ctx != NULL) {
 
@@ -259,7 +449,7 @@ void ami_ctx_invoke_event_callback(AMIctx * ami_ctx)
     SAVETMPS;
 
     PUSHMARK(SP);
-    PUSHs(sv_2mortal(newSViv(index)));
+    PUSHs(packet);
     PUTBACK;
 
     call_sv(ami_ctx->event_callback, G_DISCARD | G_EVAL|G_VOID);
@@ -276,9 +466,19 @@ void ami_ctx_invoke_event_callback(AMIctx * ami_ctx)
   }
 }
 
+void ami_ctx_feed(AMIctx * ami_ctx)
+{
+  if (ami_ctx) {
+    SV * packet = ami_ctx_parse(ami_ctx);
+    if (packet) {
+	ami_ctx_invoke_event_callback(ami_ctx, packet);
+    }
+  }
+}
+
 void ami_ctx_set_event_callback(AMIctx * ami_ctx, SV * event_callback)
 {
-  if (ami_ctx != NULL) {
+  if (ami_ctx) {
     if (event_callback != NULL) {
 	dTHX;
 	if ((SvROK(event_callback) && SvTYPE(SvRV(event_callback)) == SVt_PVCV)) {
@@ -387,12 +587,12 @@ ami_ctx_ev_read_cb (struct ev_loop *loop, ev_io *w, int revents)
 	    while((found = ami_ctx_scan_packet_end(ami_ctx))) {
 		trace("found AMI packet end at: %d\n", found);
 
-		char *found_packet = strndup(ami_ctx->buffer_head, found);
-		trace("found AMI packet: %s\n", found_packet);
+//		char *found_packet = strndup(ami_ctx->buffer_head, found);
+//		trace("found AMI packet: %s\n", found_packet);
 
-//		ami_ctx_invoke_event_callback(ami_ctx);
+		ami_ctx_feed(ami_ctx);
 
-		free(found_packet);
+//		free(found_packet);
 
 		if (ami_ctx->buffer_len > found) { // residual data
 			trace("residual AMI buffer len: %d\n", ami_ctx->buffer_len);
