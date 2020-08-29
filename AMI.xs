@@ -4,6 +4,8 @@
 #define BUFFER_PAGES 1024
 #define BUFFER_SIZE ALLOC_PAGE_SIZE * BUFFER_PAGES
 
+#define EV_MULTIPLICITY 1
+
 #ifdef DEBUG
 #define trace(f_, ...) warn("%s:%-4d [%d] " f_, __FILE__, __LINE__, (int)getpid(), ##__VA_ARGS__)
 #else
@@ -30,20 +32,23 @@
 
 // #include <pthread.h>
 
-typedef struct
+typedef struct RingBuffer_s
 {
-
     uint64_t readPointer;
     uint64_t writePointer;
     int64_t size;
-
     void *buffer[];
-
 } RingBuffer;
 
 typedef enum AMIerr_e { EAMI_NONE = 0, EAMI_FATAL, EAMI_UNKNOWN, EAMI_DESTROY } AMIerr;
 
 typedef struct AMIctx_s {
+    pthread_t * tid;
+    pthread_mutex_t * lock;
+    pthread_cond_t * invoke_cv;
+
+    struct ev_async * async_ev_w;
+
     struct ev_io * read_ev_io;
 
     struct ev_loop * loop;
@@ -69,6 +74,8 @@ typedef struct AMIctx_s {
     int sockfd;
     bool error;
     AMIerr error_code;
+    RingBuffer * parse_buffer;
+
 } AMIctx;
 
 RingBuffer *ringBufferInit(int64_t size)
@@ -178,6 +185,7 @@ AMIctx * ami_ctx_init()
 
   ami_ctx->event_callback = NULL;
   ami_ctx->read_ev_io = NULL;
+  ami_ctx->async_ev_w = NULL;
 
   memset(&ami_ctx->serv_addr, '0', sizeof(ami_ctx->serv_addr));
 
@@ -190,6 +198,15 @@ AMIctx * ami_ctx_init()
   ami_ctx->packet = newRV_noinc((SV *)ami_ctx->hv);
 //    PUSHs(sv_2mortal(newRV_noinc((SV *)packet)));
 
+  ami_ctx->tid = (pthread_t *)malloc(sizeof(pthread_t));
+
+  ami_ctx->lock = (pthread_mutex_t *)malloc(sizeof(pthread_mutex_t));
+  pthread_mutex_init(ami_ctx->lock, NULL);
+
+  ami_ctx->invoke_cv = (pthread_cond_t *)malloc(sizeof(pthread_cond_t));
+  pthread_cond_init(ami_ctx->invoke_cv, NULL);
+
+  ami_ctx->parse_buffer = ringBufferInit(BUFFER_PAGES);
 
   return ami_ctx;
 }
@@ -427,6 +444,190 @@ bool ami_ctx_parse(AMIctx * ami_ctx)
     return false;
 }
 
+SV * ami_ctx_parse_thr(const char *packet)
+{
+		const char *cursor = packet;
+		const char *f1;
+		const char *f2;
+		const char *v1;
+		const char *v2;
+		const char *yyt1;
+		const char *yyt2;
+		const char *yyt3;
+		char yych;
+
+			static const unsigned char yybm[] = {
+				128, 128, 128, 128, 128, 128, 128, 128,
+				128, 160, 128, 128, 128,   0, 128, 128,
+				128, 128, 128, 128, 128, 128, 128, 128,
+				128, 128, 128, 128, 128, 128, 128, 128,
+				160, 128, 128, 128, 128, 128, 128, 128,
+				128, 128, 128, 128, 128, 192, 192, 128,
+				192, 192, 192, 192, 192, 192, 192, 192,
+				192, 192, 128, 128, 128, 128, 128, 128,
+				128, 192, 192, 192, 192, 192, 192, 192,
+				192, 192, 192, 192, 192, 192, 192, 192,
+				192, 192, 192, 192, 192, 192, 192, 192,
+				192, 192, 192, 128, 128, 128, 128, 192,
+				128, 192, 192, 192, 192, 192, 192, 192,
+				192, 192, 192, 192, 192, 192, 192, 192,
+				192, 192, 192, 192, 192, 192, 192, 192,
+				192, 192, 192, 128, 128, 128, 128, 128,
+				128, 128, 128, 128, 128, 128, 128, 128,
+				128, 128, 128, 128, 128, 128, 128, 128,
+				128, 128, 128, 128, 128, 128, 128, 128,
+				128, 128, 128, 128, 128, 128, 128, 128,
+				128, 128, 128, 128, 128, 128, 128, 128,
+				128, 128, 128, 128, 128, 128, 128, 128,
+				128, 128, 128, 128, 128, 128, 128, 128,
+				128, 128, 128, 128, 128, 128, 128, 128,
+				128, 128, 128, 128, 128, 128, 128, 128,
+				128, 128, 128, 128, 128, 128, 128, 128,
+				128, 128, 128, 128, 128, 128, 128, 128,
+				128, 128, 128, 128, 128, 128, 128, 128,
+				128, 128, 128, 128, 128, 128, 128, 128,
+				128, 128, 128, 128, 128, 128, 128, 128,
+				128, 128, 128, 128, 128, 128, 128, 128,
+				128, 128, 128, 128, 128, 128, 128, 128,
+			};
+
+				static void *yytarget[256] = {
+					&&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,
+					&&yy3,  &&yy12, &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,
+					&&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,
+					&&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,
+					&&yy12, &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,
+					&&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy12, &&yy12, &&yy3,
+					&&yy12, &&yy12, &&yy12, &&yy12, &&yy12, &&yy12, &&yy12, &&yy12,
+					&&yy12, &&yy12, &&yy12, &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,
+					&&yy3,  &&yy12, &&yy12, &&yy12, &&yy12, &&yy12, &&yy12, &&yy12,
+					&&yy12, &&yy12, &&yy12, &&yy12, &&yy12, &&yy12, &&yy12, &&yy12,
+					&&yy12, &&yy12, &&yy12, &&yy12, &&yy12, &&yy12, &&yy12, &&yy12,
+					&&yy12, &&yy12, &&yy12, &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy12,
+					&&yy3,  &&yy12, &&yy12, &&yy12, &&yy12, &&yy12, &&yy12, &&yy12,
+					&&yy12, &&yy12, &&yy12, &&yy12, &&yy12, &&yy12, &&yy12, &&yy12,
+					&&yy12, &&yy12, &&yy12, &&yy12, &&yy12, &&yy12, &&yy12, &&yy12,
+					&&yy12, &&yy12, &&yy12, &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,
+					&&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,
+					&&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,
+					&&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,
+					&&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,
+					&&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,
+					&&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,
+					&&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,
+					&&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,
+					&&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,
+					&&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,
+					&&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,
+					&&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,
+					&&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,
+					&&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,
+					&&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,
+					&&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3,  &&yy3
+				};
+		while (1) {
+			yych = *cursor;
+			if (yych <= '9') {
+				if (yych <= ',') {
+					if (yych == '\r') goto yy4;
+				} else {
+					if (yych != '/') {
+						yyt1 = cursor;
+						goto yy5;
+					}
+				}
+			} else {
+				if (yych <= '^') {
+					if (yych <= '@') goto yy2;
+					if (yych <= 'Z') {
+						yyt1 = cursor;
+						goto yy5;
+					}
+				} else {
+					if (yych == '`') goto yy2;
+					if (yych <= 'z') {
+						yyt1 = cursor;
+						goto yy5;
+					}
+				}
+			}
+		yy2:
+			++cursor;
+		yy3:
+			{
+			break;
+			}
+		yy4:
+			yych = *++cursor;
+			if (yych == '\n') goto yy6;
+			goto yy3;
+		yy5:
+			yych = *(packet = ++cursor);
+			{
+				goto *yytarget[yych];
+			}
+		yy6:
+			++cursor;
+			{ break; }
+		yy8:
+			yych = *++cursor;
+			if (yybm[0+yych] & 32) {
+				goto yy8;
+			}
+			if (yych == ':') goto yy13;
+		yy10:
+			cursor = packet;
+			goto yy3;
+		yy11:
+			yych = *++cursor;
+		yy12:
+			if (yybm[0+yych] & 64) {
+				goto yy11;
+			}
+			if (yych <= 0x1F) {
+				goto yy10;
+			} else {
+				if (yych <= ' ') {
+					yyt2 = cursor;
+					goto yy8;
+				}
+				if (yych <= '/') goto yy10;
+				if (yych >= ';') goto yy10;
+				yyt2 = cursor;
+			}
+		yy13:
+			yych = *++cursor;
+			if (yych <= '\f') {
+				yyt3 = cursor;
+			} else {
+				if (yych <= '\r') {
+					yyt3 = cursor;
+					goto yy17;
+				}
+				if (yych == ' ') goto yy13;
+				yyt3 = cursor;
+			}
+		yy15:
+			yych = *++cursor;
+			if (yybm[0+yych] & 128) {
+				goto yy15;
+			}
+		yy17:
+			yych = *++cursor;
+			if (yych != '\n') goto yy10;
+			++cursor;
+			f1 = yyt1;
+			f2 = yyt2;
+			v1 = yyt3;
+			v2 = cursor - 2;
+			{
+			//  (void)hv_store(rh, f1, (int)(f2 - f1), newSVpvn(v1, (int)(v2 - v1)), 0);
+			  continue;
+			}
+		}
+	return NULL;
+}
+
 uint64_t ami_ctx_scan_packet_end( AMIctx * ami_ctx )
 {
   if (ami_ctx != NULL) {
@@ -519,6 +720,10 @@ int ami_ctx_stop_events(AMIctx * ami_ctx)
 		trace("ami_ctx_stop_events destroy defined read_ev_io: %p\n", ami_ctx->read_ev_io);
 		ami_ctx->read_ev_io->data = NULL;
 
+		if (ev_is_pending(ami_ctx->read_ev_io)) {
+			ev_clear_pending(ami_ctx->loop, ami_ctx->read_ev_io);
+		}
+
 		if (ev_is_active(ami_ctx->read_ev_io)) {
 			trace("ami_ctx_stop_events stop read_ev_io\n");
 			ev_io_stop(ami_ctx->loop, ami_ctx->read_ev_io);
@@ -526,6 +731,16 @@ int ami_ctx_stop_events(AMIctx * ami_ctx)
 		trace("ami_ctx_stop_events free read_ev_io\n");
 		free(ami_ctx->read_ev_io);
 		ami_ctx->read_ev_io = NULL;
+	}
+	if(ami_ctx->async_ev_w) {
+	    if (ev_async_pending(ami_ctx->async_ev_w)) {
+		ev_clear_pending(ami_ctx->loop, ami_ctx->async_ev_w);
+	    }
+	    if (ev_is_active(ami_ctx->async_ev_w)) {
+		ev_async_stop(ami_ctx->loop, ami_ctx->async_ev_w);
+	    }
+	    free(ami_ctx->async_ev_w);
+	    ami_ctx->async_ev_w = NULL;
 	}
   }
   trace("ami_ctx_stop_events end\n");
@@ -553,6 +768,11 @@ int ami_ctx_disconnect(AMIctx * ami_ctx)
   return 0;
 }
 
+static void
+ami_ctx_ew_async_cb (struct ev_loop *loop, ev_async *w, int revents)
+{
+	trace("EV async_cb call\n");
+}
 
 static void
 ami_ctx_ev_read_cb (struct ev_loop *loop, ev_io *w, int revents)
@@ -590,31 +810,36 @@ ami_ctx_ev_read_cb (struct ev_loop *loop, ev_io *w, int revents)
 	else if (n > 0) {
 	    trace("read AMI data fd %d, len: %d\n", ami_ctx->sockfd, n);
 
-	    char *read_data = strndup(ami_ctx->buffer_cursor, n);
-	    trace("read AMI data:\n|%s|\n", read_data);
-	    free(read_data);
+//	    char *read_data = strndup(ami_ctx->buffer_cursor, n);
+//	    trace("read AMI data:\n|%s|\n", read_data);
+//	    free(read_data);
 
 	    ami_ctx->buffer_len += n;
 	    ami_ctx->buffer_cursor = ami_ctx->buffer_head + ami_ctx->buffer_len;
 	    ami_ctx->buffer_pos = (int)(ami_ctx->buffer_cursor - ami_ctx->buffer_head);
 	    ami_ctx->buffer_free = BUFFER_SIZE - ami_ctx->buffer_pos;
 
-	    trace("new AMI buffer len: %d\n", ami_ctx->buffer_len);
+//	    trace("new AMI buffer len: %d\n", ami_ctx->buffer_len);
 
 	    uint64_t found = 0;
 
 	    while((found = ami_ctx_scan_packet_end(ami_ctx))) {
-		trace("found AMI packet end at: %d\n", found);
+//		trace("found AMI packet end at: %d\n", found);
 
-//		char *found_packet = strndup(ami_ctx->buffer_head, found);
+		char *found_packet = strndup(ami_ctx->buffer_head, found);
+		ringBufferAdd(ami_ctx->parse_buffer, (void *)found_packet);
 //		trace("found AMI packet: %s\n", found_packet);
 
-		ami_ctx_feed(ami_ctx);
+//		ami_ctx_feed(ami_ctx);
+
+     pthread_mutex_lock( ami_ctx->lock );
+     pthread_cond_signal( ami_ctx->invoke_cv );
+     pthread_mutex_unlock( ami_ctx->lock );
 
 //		free(found_packet);
 
 		if (ami_ctx->buffer_len > found) { // residual data
-			trace("residual AMI buffer len: %d\n", ami_ctx->buffer_len);
+//			trace("residual AMI buffer len: %d\n", ami_ctx->buffer_len);
 
 			memmove(ami_ctx->buffer_head, ami_ctx->buffer_head + found, ami_ctx->buffer_len - found);
 
@@ -623,7 +848,7 @@ ami_ctx_ev_read_cb (struct ev_loop *loop, ev_io *w, int revents)
 			ami_ctx->buffer_pos = (int)(ami_ctx->buffer_cursor - ami_ctx->buffer_head);
 			ami_ctx->buffer_free = BUFFER_SIZE - ami_ctx->buffer_pos;
 		} else {
-			trace("no residual AMI data. clear buffer\n");
+//			trace("no residual AMI data. clear buffer\n");
 
 			ami_ctx->buffer_len = 0;
 			ami_ctx->buffer_cursor = ami_ctx->buffer_head;
@@ -637,15 +862,47 @@ ami_ctx_ev_read_cb (struct ev_loop *loop, ev_io *w, int revents)
 //    trace("done reading from socket\n");
 }
 
+void * ami_ctx_thread(void * ptr)
+{
+ AMIctx * ami_ctx = (AMIctx *)ptr;
+ if (ami_ctx) {
+    for(;;)
+    {
+//     printf("thread in\n");
+     pthread_mutex_lock( ami_ctx->lock );
+
+     char * found_packet = (char *)ringBufferGet(ami_ctx->parse_buffer);
+     if (found_packet) {
+        printf("thread message: %s\n", found_packet);
+        SV * packet = ami_ctx_parse_thr(found_packet);
+        if (packet) {
+    	    printf("thread message parsed\n");
+        }
+        free(found_packet);
+     }
+     pthread_cond_wait( ami_ctx->invoke_cv, ami_ctx->lock );
+     pthread_mutex_unlock( ami_ctx->lock );
+//     printf("thread out\n");
+    }
+    pthread_exit(ami_ctx);
+ }
+}
+
 int ami_ctx_setup_events(AMIctx * ami_ctx)
 {
-  if (ami_ctx != NULL) {
+  if (ami_ctx) {
 	if (ami_ctx->sockfd > 0) {
 		if (ami_ctx->read_ev_io == NULL) {
 			ami_ctx->read_ev_io = (struct ev_io *)malloc(sizeof(struct ev_io));
 			ev_io_init(ami_ctx->read_ev_io, ami_ctx_ev_read_cb, ami_ctx->sockfd, EV_READ);
 			ami_ctx->read_ev_io->data = (void *)ami_ctx;
 			ev_io_start(ami_ctx->loop, ami_ctx->read_ev_io);
+
+			ami_ctx->async_ev_w = (struct ev_async *)malloc(sizeof(struct ev_async));
+			ev_async_init (ami_ctx->async_ev_w, ami_ctx_ew_async_cb);
+			ev_async_start (ami_ctx->loop, ami_ctx->async_ev_w);
+			pthread_create (ami_ctx->tid, 0, ami_ctx_thread, ami_ctx);
+			pthread_detach (*ami_ctx->tid);
 		}
 	} else {
 	    return -1;
@@ -751,6 +1008,11 @@ void ami_ctx_destroy (AMIctx * ami_ctx)
   if (ami_ctx) {
     trace("ami_ctx_destroy begin\n");
 
+    pthread_cancel(*ami_ctx->tid);
+
+    pthread_mutex_destroy(ami_ctx->lock);
+    pthread_cond_destroy(ami_ctx->invoke_cv);
+
     (void)ami_ctx_stop_events(ami_ctx);
     trace("ami_ctx_stop_event\n");
 
@@ -785,6 +1047,8 @@ void ami_ctx_destroy (AMIctx * ami_ctx)
     trace("ami_ctx_destroy main free\n");
     ami_ctx->error = true;
     ami_ctx->error_code = EAMI_DESTROY;
+
+    ringBufferDestroy(ami_ctx->parse_buffer);
 
     free(ami_ctx);
     ami_ctx = NULL;

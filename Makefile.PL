@@ -14,7 +14,7 @@ WriteMakefile(EV::MakeMaker::ev_args (
     ($] >= 5.005 ?     ## Add these new keywords supported since 5.005
       (ABSTRACT_FROM  => 'lib/AMI.pm', # retrieve abstract from module
        AUTHOR         => 'root <root@localdomain>') : ()),
-#    LIBS              => ['-lpthread'], # e.g., '-lm'
+    LIBS              => ['-lpthread'], # e.g., '-lm'
     DEFINE            => '-DDEBUG', # e.g., '-DHAVE_SOMETHING'
     INC               => '-I.', # e.g., '-I. -I/usr/include/other'
     OBJECT            => '$(O_FILES)', # link all the C files too
