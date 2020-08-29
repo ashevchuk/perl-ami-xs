@@ -223,12 +223,12 @@ int ami_ctx_host(AMIctx * ami_ctx, const char * host, const char * port)
   return 0;
 }
 
-SV * ami_ctx_parse(AMIctx * ami_ctx)
+HV * ami_ctx_parse(AMIctx * ami_ctx)
 {
   if (ami_ctx) {
 		dTHX;
-    		HV * rh = newHV();
-    		const char *packet = ami_ctx->buffer_head;
+		HV * rh = newHV();
+		const char *packet = ami_ctx->buffer_head;
 		const char *cursor = packet;
 		const char *f1;
 		const char *f2;
@@ -408,7 +408,8 @@ SV * ami_ctx_parse(AMIctx * ami_ctx)
 			  continue;
 			}
 		}
-	return newRV_noinc((SV *)rh);
+//	return newRV_noinc((SV *)rh);
+	return rh;
     }
 
     return NULL;
@@ -432,7 +433,7 @@ uint64_t ami_ctx_scan_packet_end( AMIctx * ami_ctx )
   return 0;
 }
 
-void ami_ctx_invoke_event_callback(AMIctx * ami_ctx, SV * packet)
+void ami_ctx_invoke_event_callback(AMIctx * ami_ctx, HV * packet)
 {
   if (ami_ctx != NULL) {
 
@@ -449,7 +450,9 @@ void ami_ctx_invoke_event_callback(AMIctx * ami_ctx, SV * packet)
     SAVETMPS;
 
     PUSHMARK(SP);
-    PUSHs(packet);
+    
+    PUSHs(sv_2mortal(newRV_noinc((SV *)packet)));
+
     PUTBACK;
 
     call_sv(ami_ctx->event_callback, G_DISCARD | G_EVAL|G_VOID);
@@ -469,7 +472,8 @@ void ami_ctx_invoke_event_callback(AMIctx * ami_ctx, SV * packet)
 void ami_ctx_feed(AMIctx * ami_ctx)
 {
   if (ami_ctx) {
-    SV * packet = ami_ctx_parse(ami_ctx);
+    dTHX;
+    HV * packet = ami_ctx_parse(ami_ctx);
     if (packet) {
 	ami_ctx_invoke_event_callback(ami_ctx, packet);
     }

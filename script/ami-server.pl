@@ -5,7 +5,7 @@ use warnings;
 
 use constant {
     ADDR  => undef,
-    DEBUG => 1,
+    DEBUG => 0,
     PORT  => 5038,
     TIME  => '%F %T'
 };
@@ -105,16 +105,18 @@ sub ami_send {
 
     $hdl->push_write($response);
 
-    if ( my $peer = getpeername( $hdl->fh() ) ) {
-            my ( $port, $host ) = Socket::unpack_sockaddr_in( $peer );
-            print_packet( '>', Socket::inet_ntoa($host) . ":" . $port, @fields )
-              if DEBUG;
+    if ( defined $hdl ) {
+        if ( my $peer = getpeername( $hdl->fh() ) ) {
+                my ( $port, $host ) = Socket::unpack_sockaddr_in( $peer );
+                print_packet( '>', Socket::inet_ntoa($host) . ":" . $port, @fields )
+                  if DEBUG;
+        }
     }
 }
 
 my $packet_size                = $ARGV[0] // 512;
-my $events_interval            = $ARGV[1] // 1;
-my $events_regenerate_interval = $ARGV[2] // 1;
+my $events_interval            = $ARGV[1] // 0.0001;
+my $events_regenerate_interval = $ARGV[2] // 10;
 
 my @event_packet;
 my %connections;
@@ -128,7 +130,7 @@ my $events_regenerate_timer = AnyEvent->timer(
     after => 0,
     cb    => sub {
         @event_packet = parse_packet( packet( $packet_size, 16, 16, 64 ) );
-        print_packet( '=', "Generated packet", @event_packet ) if DEBUG;
+#        print_packet( '=', "Generated packet", @event_packet ) if DEBUG;
     }
 );
 
