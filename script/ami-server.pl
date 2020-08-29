@@ -105,17 +105,17 @@ sub ami_send {
 
     $hdl->push_write($response);
 
-    if ( defined $hdl ) {
+    eval {
         if ( my $peer = getpeername( $hdl->fh() ) ) {
                 my ( $port, $host ) = Socket::unpack_sockaddr_in( $peer );
                 print_packet( '>', Socket::inet_ntoa($host) . ":" . $port, @fields )
                   if DEBUG;
         }
-    }
+    };
 }
 
 my $packet_size                = $ARGV[0] // 512;
-my $events_interval            = $ARGV[1] // 0.0001;
+my $events_interval            = $ARGV[1] // 0.00001;
 my $events_regenerate_interval = $ARGV[2] // 10;
 
 my @event_packet;

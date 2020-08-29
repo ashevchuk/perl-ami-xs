@@ -54,6 +54,9 @@ typedef struct AMIctx_s {
 
     SV * event_callback;
 
+    HV * hv;
+    SV * packet;
+
     uint64_t buffer_len;
     uint64_t buffer_pos;
     uint64_t buffer_free;
@@ -181,6 +184,13 @@ AMIctx * ami_ctx_init()
   ami_ctx->error = false;
   ami_ctx->error_code = EAMI_NONE;
 
+  dTHX;
+
+  ami_ctx->hv = newHV();
+  ami_ctx->packet = newRV_noinc((SV *)ami_ctx->hv);
+//    PUSHs(sv_2mortal(newRV_noinc((SV *)packet)));
+
+
   return ami_ctx;
 }
 
@@ -223,11 +233,13 @@ int ami_ctx_host(AMIctx * ami_ctx, const char * host, const char * port)
   return 0;
 }
 
-HV * ami_ctx_parse(AMIctx * ami_ctx)
+//HV * ami_ctx_parse(AMIctx * ami_ctx)
+bool ami_ctx_parse(AMIctx * ami_ctx)
 {
   if (ami_ctx) {
 		dTHX;
-		HV * rh = newHV();
+		//HV * rh = newHV();
+		hv_clear(ami_ctx->hv);
 		const char *packet = ami_ctx->buffer_head;
 		const char *cursor = packet;
 		const char *f1;
@@ -404,15 +416,15 @@ HV * ami_ctx_parse(AMIctx * ami_ctx)
 			v1 = yyt3;
 			v2 = cursor - 2;
 			{
-			  (void)hv_store(rh, f1, (int)(f2 - f1), newSVpvn(v1, (int)(v2 - v1)), 0);
+			  (void)hv_store(ami_ctx->hv, f1, (int)(f2 - f1), newSVpvn(v1, (int)(v2 - v1)), 0);
 			  continue;
 			}
 		}
 //	return newRV_noinc((SV *)rh);
-	return rh;
+	return true;
     }
 
-    return NULL;
+    return false;
 }
 
 uint64_t ami_ctx_scan_packet_end( AMIctx * ami_ctx )
@@ -433,7 +445,8 @@ uint64_t ami_ctx_scan_packet_end( AMIctx * ami_ctx )
   return 0;
 }
 
-void ami_ctx_invoke_event_callback(AMIctx * ami_ctx, HV * packet)
+//void ami_ctx_invoke_event_callback(AMIctx * ami_ctx, HV * packet)
+void ami_ctx_invoke_event_callback(AMIctx * ami_ctx)
 {
   if (ami_ctx != NULL) {
 
@@ -450,8 +463,11 @@ void ami_ctx_invoke_event_callback(AMIctx * ami_ctx, HV * packet)
     SAVETMPS;
 
     PUSHMARK(SP);
+
+    PUSHs(ami_ctx->packet);
     
-    PUSHs(sv_2mortal(newRV_noinc((SV *)packet)));
+//    PUSHs(sv_2mortal(newRV_noinc((SV *)packet)));
+    PUSHs(ami_ctx->packet);
 
     PUTBACK;
 
@@ -472,10 +488,9 @@ void ami_ctx_invoke_event_callback(AMIctx * ami_ctx, HV * packet)
 void ami_ctx_feed(AMIctx * ami_ctx)
 {
   if (ami_ctx) {
-    dTHX;
-    HV * packet = ami_ctx_parse(ami_ctx);
-    if (packet) {
-	ami_ctx_invoke_event_callback(ami_ctx, packet);
+
+    if (ami_ctx_parse(ami_ctx)) {
+	ami_ctx_invoke_event_callback(ami_ctx);
     }
   }
 }
@@ -759,6 +774,14 @@ void ami_ctx_destroy (AMIctx * ami_ctx)
         ami_ctx->event_callback = NULL;
         trace("ami_ctx_destroy after destroy callback\n");
     }
+
+    dTHX;
+
+    hv_undef(ami_ctx->hv);
+    ami_ctx->hv = NULL;
+    sv_unref(ami_ctx->packet);
+    ami_ctx->packet = NULL;
+
     trace("ami_ctx_destroy main free\n");
     ami_ctx->error = true;
     ami_ctx->error_code = EAMI_DESTROY;
