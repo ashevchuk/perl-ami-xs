@@ -44,7 +44,7 @@ sub as_packet {
     return join "\r\n", ( @packet, "\r\n" );
 }
 
-my $ami_ctx = ami_connect(EV::default_loop, "127.0.0.1", "5038", sub { print("\nAMI Event:|@_|\n") });
+my $ami_ctx = ami_connect(EV::default_loop, "127.0.0.1", "5038", sub { printf("\nAMI Event:|%s|\n", Dumper(@_)) });
 
 ami_write($ami_ctx, as_packet(
     Action => 'Login',
