@@ -6,11 +6,11 @@ use warnings;
 use constant {
     AST_HOST => "127.0.0.1",
     AST_PORT => 5038,
-    DEBUG    => 0
+    DEBUG    => 1
 };
 
 use EV;
-use AMI qw(try_connect to_packet to_packet_o to_packet_oo fields_count ami_connect ami_write ami_disconnect);
+use AMI qw(to_packet ami_connect ami_write ami_disconnect);
 use Benchmark ':hireswallclock';
 use Data::Dumper qw(Dumper);
 
@@ -55,7 +55,7 @@ sub print_packet {
 
     my $packet = join( "\n", @packet );
 
-    my $size = length($packet) - 1;
+    my $size = length($packet) + 3;
 
     printf("\n" . $dir x 3 . " %s " . $dir x 1 . " %s (%d bytes)\n%s\n" . $dir x 32 . "\n", stime(), $dst, $size, $packet );
 }
@@ -89,5 +89,5 @@ ami_write($ami_ctx, as_packet(
 EV::run;
 
 #ami_disconnect($ami_ctx);
-#undef $ami_ctx;
+undef $ami_ctx;
 

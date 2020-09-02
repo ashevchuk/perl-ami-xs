@@ -19,10 +19,6 @@ our @ISA = qw(Exporter);
 # will save memory.
 our %EXPORT_TAGS = ( 'all' => [ qw(
 	to_packet
-	to_packet_o
-	to_packet_oo
-	fields_count
-	try_connect
 	ami_connect
 	ami_write
 	ami_disconnect

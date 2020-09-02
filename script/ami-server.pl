@@ -33,20 +33,23 @@ sub print_packet {
     do { push @packet, sprintf( "\t%s: %s", shift(@fields), shift(@fields) ) }
       while scalar @fields;
     my $packet = join( "\n", @packet );
-    my $size = length($packet) - 1;
+    my $size = length($packet) + 3;
     printf(
         "\n" . $dir x 3 . " %s " . $dir x 1 . " %s (%d bytes)\n%s\n" . $dir x 32 . "\n",
         stime(), $dst, $size, $packet );
 }
 
 sub rand_packet {
-    my ( $fields, $field_size, $value_size ) = @_;
+    my ( $fields, $field_size, $value_size, @fields ) = @_;
     return join "\r\n",
       map { ref $_ ? join ": ", ( ( %{$_} )[0], ( %{$_} )[1] ) : $_ } (
         {
-            Event => (
-                join '', map { ( q(a) .. q(z) )[ rand(26) ] } 1 .. $value_size
-            )
+            scalar ( @fields )
+             ? @fields
+             : ( Event => (
+                 join '', map { ( q(a) .. q(z) )[ rand(26) ] } 1 .. $value_size
+              )
+             )
         },
         map {
             +{
@@ -64,13 +67,14 @@ sub rand_packet {
 }
 
 sub packet {
-    my ( $size, $max_fields, $max_name, $max_value ) = @_;
+    my ( $size, $max_fields, $max_name, $max_value, @fields ) = @_;
     my $packet;
     do {
         $packet = rand_packet(
             rand($max_fields) + 1,
             rand($max_name) + 1,
-            rand($max_value) + 1
+            rand($max_value) + 1,
+            @fields
         );
     } while not length($packet) == $size;
     return $packet;
@@ -121,6 +125,8 @@ my $events_regenerate_interval = $ARGV[2] // 10;
 my @event_packet;
 my %connections;
 
+my @well_known_event_packet = parse_packet( packet( $packet_size - 4, 16, 16, 64, Event => 'WellKnown' ) );
+
 my $events_regenerate_timer = AnyEvent->timer(
     (
         $events_regenerate_interval
@@ -129,7 +135,7 @@ my $events_regenerate_timer = AnyEvent->timer(
     ),
     after => 0,
     cb    => sub {
-        @event_packet = parse_packet( packet( $packet_size, 16, 16, 64 ) );
+        @event_packet = parse_packet( packet( $packet_size - 4, 16, 16, 64 ) );
 #        print_packet( '=', "Generated packet", @event_packet ) if DEBUG;
     }
 );
@@ -151,10 +157,12 @@ AnyEvent::Socket::tcp_server(
                     stime(), $host, $port, $_[2] )
                   if DEBUG;
                 undef $_[0]->{send_timer} if exists $_[0]->{send_timer};
+                undef $_[0]->{send_well_known_timer} if exists $_[0]->{send_well_known_timer};
                 $_[0]->destroy;
             },
             on_eof => sub {
                 undef $handle->{send_timer} if exists $handle->{send_timer};
+                undef $handle->{send_well_known_timer} if exists $handle->{send_well_known_timer};
                 $handle->destroy;
                 printf( "\n=== %s = AMI client (%s:%s) disconnected\n",
                     stime(), $host, $port )
@@ -197,6 +205,14 @@ AnyEvent::Socket::tcp_server(
                                     interval => $events_interval,
                                     cb       => sub {
                                         ami_send( $hdl, @event_packet );
+                                    }
+                                );
+
+                                $hdl->{send_well_known_timer} = AnyEvent->timer(
+                                    after    => 1,
+                                    interval => 1,
+                                    cb       => sub {
+                                        ami_send( $hdl, @well_known_event_packet );
                                     }
                                 );
                             }
