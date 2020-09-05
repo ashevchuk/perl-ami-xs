@@ -20,6 +20,8 @@
 #include <stdint.h>
 #include <unistd.h>
 
+#include <pthread.h>
+
 #ifdef __GNUC__
 #ifndef LIKELY
 # define LIKELY(A_COND)   __builtin_expect(!!(A_COND), 1)
@@ -43,10 +45,8 @@
 #define PACKET_HEAD_BUFFER_SIZE ALLOC_PAGE_SIZE
 #define PACKET_READ_BUFFER_SIZE ALLOC_PAGE_SIZE
 
-#define PTR_T(A_TYPE) __typeof__(A_TYPE *)
-
 typedef char AMIcbuff_t;
-typedef PTR_T(AMIcbuff_t) AMIcpbuff_t;
+typedef AMIcbuff_t * AMIcpbuff_t;
 
 #define CONSTANT(A_VAR, A_VAL) static const AMIcpbuff_t A_VAR = A_VAL; static const unsigned int A_VAR ## _size = sizeof(A_VAL) - 1
 
@@ -80,21 +80,12 @@ CONSTANT(ast_pkt_head_event_well_known, AST_PKT_HEAD_EVENT_WELL_KNOWN);
 #define ATOMIC_COMPARE_EXCHANGE(ptr, expected, desired) __atomic_compare_exchange_n(ptr, expected, desired, 0, ATOMIC_MEMORDER, ATOMIC_MEMORDER)
 #define ATOMIC_LOAD(ptr) __atomic_load_n(ptr, ATOMIC_MEMORDER)
 
-#define UNDEF(A_PTR) A_PTR = NULL
-
-#define ALLOC_MEM_LEN(A_LEN) malloc(A_LEN)
-#define ALLOC_MEM(A_PTR, A_LEN, A_TYPE) A_PTR = (A_TYPE *)ALLOC_MEM_LEN(A_LEN * sizeof(A_TYPE))
-#define ALLOC_MEM_CAST(A_PTR, A_LEN, A_TYPE, A_CAST) A_PTR = (A_CAST *)ALLOC_MEM_LEN(A_LEN * sizeof(A_TYPE))
+#define ALLOC_MEM(A_PTR, A_LEN, A_TYPE) A_PTR = (A_TYPE *)malloc(A_LEN * sizeof(A_TYPE))
+#define ALLOC_MEM_CAST(A_PTR, A_LEN, A_TYPE, A_CAST) A_PTR = (A_CAST *)malloc(A_LEN * sizeof(A_TYPE))
 #define ALLOC_MEM_ZERO_FILL(A_PTR, A_LEN, A_TYPE) ALLOC_MEM(A_PTR, A_LEN, A_TYPE); memset((A_TYPE *)A_PTR, '\0', A_LEN * sizeof(A_TYPE))
-
-#define ALLOC_MEM_TYPE(A_TYPE) ALLOC_MEM_LEN(sizeof(A_TYPE))
-#define ALLOC_MEM_OBJ(A_PTR) ALLOC_MEM_TYPE(__typeof__(A_PTR))
-#define ALLOC_OBJ(A_PTR) A_PTR = ALLOC_MEM_OBJ(A_PTR)
 
 #define ALLOC_DECLARE(A_PTR, A_LEN, A_TYPE) A_TYPE * A_PTR = NULL; ALLOC_MEM(A_PTR, A_LEN, A_TYPE)
 #define ALLOC_DECLARE_CAST(A_PTR, A_LEN, A_TYPE, A_CAST) A_TYPE * A_PTR = NULL; ALLOC_MEM_CAST(A_PTR, A_LEN, A_TYPE, A_CAST)
-
-#define ALLOC_DECLARE_OBJ(A_PTR, A_TYPE) PTR_T(A_TYPE) A_PTR = ALLOC_MEM_TYPE(A_TYPE)
 
 #define FREE_MEM(A_PTR) free(A_PTR)
 
@@ -103,7 +94,7 @@ CONSTANT(ast_pkt_head_event_well_known, AST_PKT_HEAD_EVENT_WELL_KNOWN);
 
 //#define DEFINED(A_PTR) A_PTR != NULL
 #define DEFINED(A_PTR) A_PTR
-
+#define UNDEF(A_PTR) A_PTR = NULL
 #define FREE_AND_UNDEF_CHECKED(A_PTR) if (LIKELY(DEFINED(A_PTR))) { FREE_MEM(A_PTR); UNDEF(A_PTR); }
 #define FREE_AND_UNDEF(A_PTR) do { FREE_MEM(A_PTR); UNDEF(A_PTR); } while(0)
 
@@ -113,31 +104,18 @@ CONSTANT(ast_pkt_head_event_well_known, AST_PKT_HEAD_EVENT_WELL_KNOWN);
 #define DEBUG_STATS 1000000UL
 
 #ifdef DEBUG_STATS
-#include <math.h>
-#include <time.h>
-
 #define STATi(A_AMI_CTX, A_METRIC, A_VALUE) (A_AMI_CTX)->stat_ ## A_METRIC += A_VALUE
 #define STATz(A_AMI_CTX, A_METRIC) (A_AMI_CTX)->stat_ ## A_METRIC = 0
-#define STATS(A_AMI_CTX) \
-	if ((A_AMI_CTX)->stat_packets > 0 && ((A_AMI_CTX)->stat_packets % DEBUG_STATS == 0)) { \
-		(A_AMI_CTX)->time_end = clock(); \
-		(A_AMI_CTX)->time_used = ((double) ((A_AMI_CTX)->time_end - (A_AMI_CTX)->time_start)) / CLOCKS_PER_SEC; \
-		(A_AMI_CTX)->time_start = clock(); \
-		fprintf(stderr, "%.2f seconds for %lu packets parsed, %lu bytes received, %lu callbacks invoked at %.2f bytes/s, %.2f packets/s, %.2f Mibit/s\n", (A_AMI_CTX)->time_used, (A_AMI_CTX)->stat_packets, (A_AMI_CTX)->stat_bytes, (A_AMI_CTX)->stat_callbacks, (A_AMI_CTX)->stat_bytes/(A_AMI_CTX)->time_used, (A_AMI_CTX)->stat_packets/(A_AMI_CTX)->time_used, ((((A_AMI_CTX)->stat_bytes/(A_AMI_CTX)->time_used) * 8) / pow(2, 20))); \
-		STATz(A_AMI_CTX, packets); \
-		STATz(A_AMI_CTX, bytes); \
-		STATz(A_AMI_CTX, callbacks); \
-	}
 #else
 #define STATi(...)
 #define STATz(...)
-#define STATS(...)
 #endif
 
 
 #ifdef DEBUG
 #include <sys/ioctl.h>
 #include <execinfo.h>
+#include <time.h>
 
 #define DEFAULT_TERM_COLS 80
 
@@ -244,25 +222,16 @@ void hexdump(const char * label, const char * file, int line, const char * calle
 #define trace_back
 #endif
 
-typedef enum AMIerr_e {
-	EAMI_NONE      = 0b00000000,
-	EAMI_FATAL     = 0b00000001,
-	EAMI_NON_FATAL = 0b00000010,
-	EAMI_TIMEOUT   = 0b00000100,
-	EAMI_DESTROY   = 0b10000000
-} AMIerr_t;
+typedef enum AMIerr_e { EAMI_NONE = 0, EAMI_FATAL, EAMI_UNKNOWN, EAMI_DESTROY } AMIerr_t;
 
-typedef enum AMIstate_e {
-	SAMI_NONE          = 0b00000000,
-	SAMI_CONNECTING    = 0b00000001,
-	SAMI_CONNECTED     = 0b00000010,
-	SAMI_DISCONNECTING = 0b00000100,
-	SAMI_DISCONNECTED  = 0b00001000,
-	SAMI_HANDSHAKE     = 0b00010000,
-	SAMI_LOGIN         = 0b00100000,
-	SAMI_READY         = 0b01000000,
-	SAMI_INVALID       = 0b10000000
-} AMIstate_t;
+typedef enum AMIstate_e { SAMI_NONE = 0, SAMI_DESTROY } AMIstate_t;
+
+typedef struct AMIbuff_s {
+	uint64_t read_ptr;
+	uint64_t write_ptr;
+	int64_t len;
+	void *ring[];
+} AMIbuff_t;
 
 typedef struct AMIvalue_s {
 	size_t len;
@@ -282,16 +251,30 @@ typedef struct AMIpkt_s {
 } AMIpkt_t;
 
 typedef struct AMIctx_s {
-	struct ev_loop * loop;
+	pthread_t * parse_thread_id;
+	pthread_mutex_t * parse_thread_cv_lock;
+	pthread_cond_t * parse_thread_cv;
+
+	struct ev_async * async_ev_w;
+
 	struct ev_io * read_ev_io;
 
-	AMIcpbuff_t buffer;
-	AMIcpbuff_t buffer_cursor;
+	struct ev_loop * loop;
+
+	AMIcpbuff_t buffer __attribute__ ((nonstring));
+	AMIcpbuff_t buffer_head __attribute__ ((nonstring));
+	AMIcpbuff_t buffer_cursor __attribute__ ((nonstring));
+
+//	AMIcpbuff_t last_packet_head_type;
+//	size_t last_packet_head_type_len;
 
 	AMIfield_t * last_event;
+//	AMIcpbuff_t last_event;
+//	size_t last_event_len;
 
 	SV * on_event_callback;
 	SV * on_connect_callback;
+
 	SV * on_error_callback;
 	SV * on_disconnect_callback;
 	SV * on_connect_error_callback;
@@ -301,6 +284,8 @@ typedef struct AMIctx_s {
 	SV * packet;
 
 	size_t buffer_len;
+	size_t buffer_pos;
+	size_t buffer_free;
 
 	unsigned int portno;
 
@@ -308,10 +293,10 @@ typedef struct AMIctx_s {
 	struct hostent *server;
 
 	int sockfd;
-
 	bool error;
-	uint8_t error_code;
-	uint8_t state;
+	AMIerr_t error_code;
+	AMIbuff_t * parse_buffer;
+	AMIbuff_t * parsed_buffer;
 
 #ifdef DEBUG_STATS
 	size_t stat_packets;
@@ -324,10 +309,8 @@ typedef struct AMIctx_s {
 #endif
 } AMIctx_t;
 
-void ami_ctx_disconnect(AMIctx_t * ami_ctx);
-
 #define ami_ctx_value_declare(value) \
-	ALLOC_DECLARE_OBJ(value, AMIvalue_t); \
+	ALLOC_DECLARE(value, 1, AMIvalue_t); \
 	UNDEF(value->content); \
 	value->len = 0;
 
@@ -363,7 +346,7 @@ void ami_ctx_disconnect(AMIctx_t * ami_ctx);
 
 #define ami_ctx_assign_packet_buffer(A_AMI_CTX, A_PACKET_BUFFER, A_LEN) \
 	ami_ctx_value_declare(A_PACKET_BUFFER); \
-	ami_ctx_value_assign(A_PACKET_BUFFER, (A_AMI_CTX)->buffer, A_LEN)
+	ami_ctx_value_assign(A_PACKET_BUFFER, (A_AMI_CTX)->buffer_head, A_LEN)
 
 #define ami_ctx_pkt_declare(A_PACKET) \
 	ALLOC_DECLARE((A_PACKET), 1, AMIpkt_t); \
@@ -432,6 +415,72 @@ void ami_ctx_disconnect(AMIctx_t * ami_ctx);
 	ami_ctx_field_create(new_field, (A_FIELD), (A_FIELD_LEN), (A_VALUE), (A_VALUE_LEN)); \
 	ami_ctx_pkt_push_field((A_PACKET), new_field)
 
+AMIbuff_t *ami_ctx_ring_buffer_init(size_t len)
+{
+	AMIbuff_t * ring_buffer = malloc(sizeof(AMIbuff_t) + len * sizeof(void*));
+	ring_buffer->read_ptr = 0;
+	ring_buffer->write_ptr = 0;
+	ring_buffer->len = len;
+	memset(ring_buffer->ring, 1, len * sizeof(void*));
+	return ring_buffer;
+}
+
+int ami_ctx_ring_buffer_push(AMIbuff_t *ring_buffer, void *value)
+{
+	uint64_t read_ptr;
+	uint64_t write_ptr;
+	uint64_t real_ptr;
+	void *old_value;
+	while (1) {
+		read_ptr = ATOMIC_LOAD(&ring_buffer->read_ptr);
+		write_ptr = ATOMIC_LOAD(&ring_buffer->write_ptr);
+		if (UNLIKELY(write_ptr - read_ptr >= ring_buffer->len)) {
+			return 0;
+		}
+		real_ptr = write_ptr % ring_buffer->len;
+		old_value = ring_buffer->ring[real_ptr];
+		if (!old_value || !ATOMIC_COMPARE_EXCHANGE(&ring_buffer->ring[real_ptr], &old_value, 0)) {
+			continue;
+		}
+		if (ATOMIC_COMPARE_EXCHANGE(&ring_buffer->write_ptr, &write_ptr, write_ptr + 1)) {
+			break;
+		}
+		void *null_value = NULL;
+		ATOMIC_COMPARE_EXCHANGE(&ring_buffer->ring[real_ptr], &null_value, old_value);
+	}
+	ring_buffer->ring[real_ptr] = value;
+	return 1;
+}
+
+void *ami_ctx_ring_buffer_pop(AMIbuff_t *ring_buffer)
+{
+	uint64_t read_ptr;
+	uint64_t write_ptr;
+	uint64_t real_ptr;
+	void *value;
+	while (1) {
+		write_ptr = ATOMIC_LOAD(&ring_buffer->write_ptr);
+		read_ptr = ATOMIC_LOAD(&ring_buffer->read_ptr);
+		if (UNLIKELY(read_ptr >= write_ptr)) {
+			return NULL;
+		}
+		real_ptr = read_ptr % ring_buffer->len;
+		value = ring_buffer->ring[real_ptr];
+		if (UNLIKELY(!value)) {
+			return NULL;
+		}
+		if (ATOMIC_COMPARE_EXCHANGE(&ring_buffer->read_ptr, &read_ptr, read_ptr + 1)) {
+			break;
+		}
+	}
+	return value;
+}
+
+void ami_ctx_ring_buffer_destroy(AMIbuff_t *ring_buffer)
+{
+	FREE_AND_UNDEF(ring_buffer);
+}
+
 AMIfield_t * ami_ctx_pkt_get_field(AMIpkt_t * packet, const AMIcpbuff_t field, size_t len)
 {
 	if (LIKELY(DEFINED(packet))) {
@@ -455,7 +504,12 @@ AMIctx_t * ami_ctx_init()
 	ami_ctx_field_init(ami_ctx->last_event);
 
 	ami_ctx->buffer_len = 0;
+	ami_ctx->buffer_pos = 0;
+	ami_ctx->buffer_free = BUFFER_SIZE;
+
 	ALLOC_BUFF(ami_ctx->buffer, BUFFER_SIZE);
+
+	ami_ctx->buffer_head = ami_ctx->buffer;
 	ami_ctx->buffer_cursor = ami_ctx->buffer;
 
 	ami_ctx->loop = EV_DEFAULT;
@@ -473,12 +527,23 @@ AMIctx_t * ami_ctx_init()
 	UNDEF(ami_ctx->on_timeout_callback);
 
 	UNDEF(ami_ctx->read_ev_io);
+	UNDEF(ami_ctx->async_ev_w);
 
 	memset(&ami_ctx->serv_addr, '0', sizeof(ami_ctx->serv_addr));
 
 	ami_ctx->error = false;
 	ami_ctx->error_code = EAMI_NONE;
-	ami_ctx->state = SAMI_NONE;
+
+	ALLOC_MEM(ami_ctx->parse_thread_id, 1, pthread_t);
+
+	ALLOC_MEM(ami_ctx->parse_thread_cv_lock, 1, pthread_mutex_t);
+	pthread_mutex_init(ami_ctx->parse_thread_cv_lock, NULL);
+
+	ALLOC_MEM(ami_ctx->parse_thread_cv, 1, pthread_cond_t);
+	pthread_cond_init(ami_ctx->parse_thread_cv, NULL);
+
+	ami_ctx->parse_buffer = ami_ctx_ring_buffer_init(BUFFER_PAGES);
+	ami_ctx->parsed_buffer = ami_ctx_ring_buffer_init(BUFFER_PAGES);
 
 #ifdef DEBUG_STATS
 	ami_ctx->time_start = clock();
@@ -540,55 +605,31 @@ AMIctx_t * ami_ctx_init()
 		ami_ctx_assign_callback((A_AMI_CTX), (A_AMI_CTX)->on_ ## A_EVENT ## _callback, (A_CALLBACK)); \
 	} \
 
-void ami_ctx_set_event_callback(AMIctx_t * ami_ctx, SV * callback) { ami_ctx_set_callback(ami_ctx, event, callback); }
-void ami_ctx_set_connect_callback(AMIctx_t * ami_ctx, SV * callback) { ami_ctx_set_callback(ami_ctx, connect, callback); }
-void ami_ctx_set_error_callback(AMIctx_t * ami_ctx, SV * callback) { ami_ctx_set_callback(ami_ctx, error, callback); }
-void ami_ctx_set_disconnect_callback(AMIctx_t * ami_ctx, SV * callback) { ami_ctx_set_callback(ami_ctx, disconnect, callback); }
-void ami_ctx_set_connect_error_callback(AMIctx_t * ami_ctx, SV * callback) { ami_ctx_set_callback(ami_ctx, connect_error, callback); }
-void ami_ctx_set_timeout_callback(AMIctx_t * ami_ctx, SV * callback) { ami_ctx_set_callback(ami_ctx, timeout, callback); }
-
-#define ami_ctx_invoke_event_callback(A_AMI_CTX) ami_ctx_invoke_callback((A_AMI_CTX), event, (A_AMI_CTX)->packet)
-void ami_ctx_invoke_connect_callback(AMIctx_t * ami_ctx) { ami_ctx_invoke_callback(ami_ctx, connect, NULL); }
-void ami_ctx_invoke_error_callback(AMIctx_t * ami_ctx) { ami_ctx_invoke_callback(ami_ctx, error, NULL); }
-void ami_ctx_invoke_disconnect_callback(AMIctx_t * ami_ctx) { ami_ctx_invoke_callback(ami_ctx, disconnect, NULL); }
-void ami_ctx_invoke_connect_error_callback(AMIctx_t * ami_ctx) { ami_ctx_invoke_callback(ami_ctx, connect_error, NULL); }
-void ami_ctx_invoke_timeout_callback(AMIctx_t * ami_ctx) { ami_ctx_invoke_callback(ami_ctx, timeout, NULL); }
-
-#define ami_ctx_unset_state(A_AMI_CTX, A_STATE) (A_AMI_CTX)->state &= ~A_STATE;
-#define ami_ctx_set_state(A_AMI_CTX, A_STATE) (A_AMI_CTX)->state |= A_STATE;
-
-void ami_ctx_unset_error(AMIctx_t * ami_ctx, const uint8_t code)
-{
-	ami_ctx->error_code &= ~code;
-	if((ami_ctx->error = (bool)(ami_ctx->error_code != EAMI_NONE))) {
-		ami_ctx_set_state(ami_ctx, SAMI_INVALID);
-	} else {
-		ami_ctx_unset_state(ami_ctx, SAMI_INVALID);
-	}
+void ami_ctx_set_event_callback(AMIctx_t * ami_ctx, SV * callback) {
+	ami_ctx_set_callback(ami_ctx, event, callback);
 }
 
-void ami_ctx_set_error(AMIctx_t * ami_ctx, const uint8_t code, const char * message)
+#define ami_ctx_invoke_event_callback(A_AMI_CTX) ami_ctx_invoke_callback((A_AMI_CTX), event, (A_AMI_CTX)->packet)
+
+void ami_ctx_set_connect_callback(AMIctx_t * ami_ctx, SV * callback) { ami_ctx_set_callback(ami_ctx, connect, callback); }
+void ami_ctx_invoke_connect_callback(AMIctx_t * ami_ctx) { ami_ctx_invoke_callback(ami_ctx, connect, NULL); }
+void ami_ctx_set_error_callback(AMIctx_t * ami_ctx, SV * callback) { ami_ctx_set_callback(ami_ctx, error, callback); }
+void ami_ctx_invoke_error_callback(AMIctx_t * ami_ctx) { ami_ctx_invoke_callback(ami_ctx, error, NULL); }
+void ami_ctx_set_disconnect_callback(AMIctx_t * ami_ctx, SV * callback) { ami_ctx_set_callback(ami_ctx, disconnect, callback); }
+void ami_ctx_invoke_disconnect_callback(AMIctx_t * ami_ctx) { ami_ctx_invoke_callback(ami_ctx, disconnect, NULL); }
+void ami_ctx_set_connect_error_callback(AMIctx_t * ami_ctx, SV * callback) { ami_ctx_set_callback(ami_ctx, connect_error, callback); }
+void ami_ctx_invoke_connect_error_callback(AMIctx_t * ami_ctx) { ami_ctx_invoke_callback(ami_ctx, connect_error, NULL); }
+void ami_ctx_set_timeout_callback(AMIctx_t * ami_ctx, SV * callback) { ami_ctx_set_callback(ami_ctx, timeout, callback); }
+void ami_ctx_invoke_timeout_callback(AMIctx_t * ami_ctx) { ami_ctx_invoke_callback(ami_ctx, timeout, NULL); }
+
+void ami_ctx_set_error(AMIctx_t * ami_ctx, const AMIerr_t code, const AMIcpbuff_t message)
 {
-	ami_ctx->error_code |= code;
-	if((ami_ctx->error = (bool)(ami_ctx->error_code != EAMI_NONE))) {
-		ami_ctx_set_state(ami_ctx, SAMI_INVALID);
-		fprintf(stderr, "Error: %s(%d) ", message, code);
-		if (ami_ctx->error_code & EAMI_FATAL) {
-			ami_ctx_unset_error(ami_ctx, EAMI_NON_FATAL);
-			fprintf(stderr, "FATAL ");
-		}
-		if (ami_ctx->error_code & EAMI_NON_FATAL) {
-			fprintf(stderr, "NOT FATAL ");
-		}
-		if (ami_ctx->error_code & EAMI_DESTROY) {
-			fprintf(stderr, "DESTROY PHASE ");
-		}
-		fprintf(stderr, "\n");
-		ami_ctx_disconnect(ami_ctx);
+#ifdef DEBUG
+	trace("AMI error: %s, code: %d\n", message, (uint8_t)code);
+#endif
+		ami_ctx->error = true;
+		ami_ctx->error_code = code;
 		ami_ctx_invoke_error_callback(ami_ctx);
-	} else {
-		ami_ctx_unset_state(ami_ctx, SAMI_INVALID);
-	}
 }
 
 bool ami_ctx_is_error(AMIctx_t * ami_ctx)
@@ -617,18 +658,19 @@ int ami_ctx_host(AMIctx_t * ami_ctx, const AMIcpbuff_t host, const AMIcpbuff_t p
 	return 0;
 }
 
-#define ami_ctx_parse_buffer(A_PARSED_PACKET, A_PACKET_BUFFER, A_LEN) \
-	register AMIcpbuff_t packet = A_PACKET_BUFFER; \
-	register AMIcpbuff_t cursor = packet; \
-	register AMIcpbuff_t tail = A_PACKET_BUFFER + A_LEN; \
-	register AMIcpbuff_t f1; \
-	register AMIcpbuff_t f2; \
-	register AMIcpbuff_t v1; \
-	register AMIcpbuff_t v2; \
-	register AMIcpbuff_t yyt1; \
-	register AMIcpbuff_t yyt2; \
-	register AMIcpbuff_t yyt3; \
-	register char yych; \
+#define ami_ctx_parse_buffer(A_PARSED_PACKET, A_PACKET_BUFFER) \
+	ami_ctx_pkt_declare(A_PARSED_PACKET); \
+	AMIcpbuff_t packet = (A_PACKET_BUFFER)->content; \
+	AMIcpbuff_t cursor = packet; \
+	AMIcpbuff_t tail = (A_PACKET_BUFFER)->content + (A_PACKET_BUFFER)->len; \
+	AMIcpbuff_t f1; \
+	AMIcpbuff_t f2; \
+	AMIcpbuff_t v1; \
+	AMIcpbuff_t v2; \
+	AMIcpbuff_t yyt1; \
+	AMIcpbuff_t yyt2; \
+	AMIcpbuff_t yyt3; \
+	char yych; \
 	static const unsigned char yybm[] = { \
 		128, 128, 128, 128, 128, 128, 128, 128, \
 		128, 160, 128, 128, 128,   0, 128, 128, \
@@ -794,32 +836,52 @@ int ami_ctx_host(AMIctx_t * ami_ctx, const AMIcpbuff_t host, const AMIcpbuff_t p
 			v1 = yyt3; \
 			v2 = cursor - 2; \
 			{ \
-				(void)hv_store(A_PARSED_PACKET, f1, (int)(f2 - f1), newSVpvn(v1, (int)(v2 - v1)), 0); \
+				ami_ctx_pkt_set_field(A_PARSED_PACKET, f1, (int)(f2 - f1), v1, (int)(v2 - v1)); \
 				continue; \
 			} \
 	}
 
-#define ami_ctx_scan_chars(A_AMI_CTX, A_POS, A_VALUE, A_LEN) \
-	register AMIcpbuff_t cursor = memmem((A_AMI_CTX)->buffer, (A_AMI_CTX)->buffer_len, A_VALUE, A_LEN); \
-	A_POS = LIKELY(DEFINED(cursor)) ? (cursor - (A_AMI_CTX)->buffer + 1) : -1
+inline int64_t ami_ctx_scan_char(const AMIctx_t * ami_ctx, const AMIcpbuff_t value )
+{
+	register AMIcpbuff_t cursor = (AMIcpbuff_t)memchr(ami_ctx->buffer_head, *value, ami_ctx->buffer_len);
+	if (LIKELY(DEFINED(cursor))) {
+		return cursor - ami_ctx->buffer_head + 1;
+	}
+	return -1;
+}
 
-#define ami_ctx_scan_nchars(A_AMI_CTX, A_POS, A_BUFFER_LEN, A_VALUE, A_LEN) \
-	register AMIcpbuff_t cursor = memmem((A_AMI_CTX)->buffer, A_BUFFER_LEN, A_VALUE, A_LEN); \
-	A_POS = LIKELY(DEFINED(cursor)) ? (cursor - (A_AMI_CTX)->buffer + 1) : -1
+inline int64_t ami_ctx_scan_chars(const AMIctx_t * ami_ctx, const AMIcpbuff_t value, size_t len)
+{
+	register AMIcpbuff_t cursor = (AMIcpbuff_t)memmem(ami_ctx->buffer_head, ami_ctx->buffer_len, value, len);
+	if (LIKELY(DEFINED(cursor))) {
+		return cursor - ami_ctx->buffer_head + 1;
+	}
+	return -1;
+}
 
-#define ami_ctx_scan_packet_end(A_AMI_CTX, A_POS) \
-	register int64_t i = 0; \
-	ami_ctx_scan_chars(A_AMI_CTX, i, ast_pkt_separator_end, ast_pkt_separator_end_size); \
-	A_POS = LIKELY(i != -1) ? (i+ast_pkt_separator_end_size-1) : -1
+inline int64_t ami_ctx_scan_nchars(const AMIctx_t * ami_ctx, size_t buffer_len, const AMIcpbuff_t value, const size_t len )
+{
+	register AMIcpbuff_t cursor = (AMIcpbuff_t)memmem(ami_ctx->buffer_head, buffer_len, value, len);
+	if (LIKELY(DEFINED(cursor))) {
+		return cursor - ami_ctx->buffer_head + 1;
+	}
+	return -1;
+}
 
-int64_t ami_ctx_scan_banner_end(const AMIctx_t * ami_ctx )
+static inline int64_t ami_ctx_scan_packet_end(const AMIctx_t * ami_ctx )
 {
 	register int64_t i = 0;
-	register int64_t i2 = 0;
-	ami_ctx_scan_chars( ami_ctx, i, ast_pkt_separator_field_end, ast_pkt_separator_field_end_size);
-	if (LIKELY(i != -1)) {
-		ami_ctx_scan_nchars( ami_ctx, i2, i-1, ast_pkt_banner, ast_pkt_banner_size);
-		if (LIKELY(i2 != -1)) {
+	if (LIKELY((i = ami_ctx_scan_chars( ami_ctx, ast_pkt_separator_end, ast_pkt_separator_end_size)) > -1)) {
+		return i+ast_pkt_separator_end_size-1;
+	}
+	return -1;
+}
+
+static inline int64_t ami_ctx_scan_banner_end(const AMIctx_t * ami_ctx )
+{
+	register int64_t i = 0;
+	if (LIKELY((i = ami_ctx_scan_chars( ami_ctx, ast_pkt_separator_field_end, ast_pkt_separator_field_end_size)) > -1)) {
+		if (LIKELY(ami_ctx_scan_nchars( ami_ctx, i-1, ast_pkt_banner, ast_pkt_banner_size) > -1)) {
 			return i+ast_pkt_separator_field_end_size;
 		}
 	}
@@ -829,13 +891,11 @@ int64_t ami_ctx_scan_banner_end(const AMIctx_t * ami_ctx )
 #define ami_ctx_scan_head(A_AMI_CTX) \
 	register int64_t i = 0; \
 	register int64_t i2 = 0; \
-	ami_ctx_scan_chars( (A_AMI_CTX), i, ast_pkt_separator_field_end, ast_pkt_separator_field_end_size); \
-	if (LIKELY(i != -1)) { \
-		buffer_dump("Packet head detected", (A_AMI_CTX)->buffer, i-1); \
-		ami_ctx_scan_nchars( (A_AMI_CTX), i2, i-1, ast_pkt_separator_field_value, ast_pkt_separator_field_value_size); \
-		if (LIKELY(i2 != -1)) { \
+	if (LIKELY((i = ami_ctx_scan_chars( (A_AMI_CTX), ast_pkt_separator_field_end, ast_pkt_separator_field_end_size)) > -1)) { \
+		buffer_dump("Packet head detected", (A_AMI_CTX)->buffer_head, i-1); \
+		if (LIKELY(( i2 = ami_ctx_scan_nchars( (A_AMI_CTX), i-1, ast_pkt_separator_field_value, ast_pkt_separator_field_value_size)) > -1)) { \
 			STATi(A_AMI_CTX, packets, 1); \
-			ami_ctx_field_assign((A_AMI_CTX)->last_event, (A_AMI_CTX)->buffer, i2 - 1, (A_AMI_CTX)->buffer + i2 + 1, i - i2 - 2); \
+			ami_ctx_field_assign((A_AMI_CTX)->last_event, (A_AMI_CTX)->buffer_head, i2 - 1, (A_AMI_CTX)->buffer_head + i2 + 1, i - i2 - 2); \
 			buffer_dump("Packet type detected", (A_AMI_CTX)->last_event->name->content, (A_AMI_CTX)->last_event->name->len); \
 			buffer_dump("Packet value detected", (A_AMI_CTX)->last_event->value->content, (A_AMI_CTX)->last_event->value->len); \
 		} \
@@ -844,11 +904,15 @@ int64_t ami_ctx_scan_banner_end(const AMIctx_t * ami_ctx )
 bool ami_ctx_scan_filter(AMIctx_t * ami_ctx )
 {
 		ami_ctx_scan_head(ami_ctx);
-//		return true;
+		return true;
 		if (LIKELY(!memcmp(ami_ctx->last_event->name->content, ast_pkt_head_event, min(ast_pkt_head_event_size, ami_ctx->last_event->name->len)))) {
+#ifdef DEBUG
 			buffer_dump("Packet type passed filter", ami_ctx->last_event->name->content, ami_ctx->last_event->name->len);
+#endif
 			if (LIKELY(!memcmp(ami_ctx->last_event->value->content, ast_pkt_head_event_well_known, min(ast_pkt_head_event_well_known_size, ami_ctx->last_event->value->len)))) {
+#ifdef DEBUG
 				buffer_dump("Packet value passed filter", ami_ctx->last_event->value->content, ami_ctx->last_event->value->len);
+#endif
 				return true;
 			}
 		} else {
@@ -857,129 +921,246 @@ bool ami_ctx_scan_filter(AMIctx_t * ami_ctx )
 	return false;
 }
 
-void ami_ctx_disable_events(AMIctx_t * ami_ctx)
+int ami_ctx_stop_events(AMIctx_t * ami_ctx)
 {
+#ifdef DEBUG
+	trace("ami_ctx_stop_events begin ctx: %p\n", ami_ctx);
+	trace("ami_ctx_stop_events destroy read_ev_io: %p\n", ami_ctx->read_ev_io);
+#endif
 	if (LIKELY(DEFINED(ami_ctx->read_ev_io))) {
-		trace("Disable events ctx: %p, read_ev_io: %p\n", ami_ctx, ami_ctx->read_ev_io);
+		pthread_cancel(*ami_ctx->parse_thread_id);
+#ifdef DEBUG
+		trace("ami_ctx_stop_events destroy defined read_ev_io: %p\n", ami_ctx->read_ev_io);
+#endif
+		UNDEF(ami_ctx->read_ev_io->data);
+
 		if (ev_is_pending(ami_ctx->read_ev_io)) {
-			trace("Clear pending events\n");
 			ev_clear_pending(ami_ctx->loop, ami_ctx->read_ev_io);
 		}
+
 		if (LIKELY(ev_is_active(ami_ctx->read_ev_io))) {
-			trace("Stop event listener\n");
+#ifdef DEBUG
+			trace("ami_ctx_stop_events stop read_ev_io\n");
+#endif
 			ev_io_stop(ami_ctx->loop, ami_ctx->read_ev_io);
 		}
-		trace("Disable events done\n");
-	}
-}
-
-void ami_ctx_unset_events(AMIctx_t * ami_ctx)
-{
-	if (LIKELY(DEFINED(ami_ctx->read_ev_io))) {
-		trace("Unset events ctx: %p, read_ev_io: %p\n", ami_ctx, ami_ctx->read_ev_io);
-		ami_ctx_disable_events(ami_ctx);
-		UNDEF(ami_ctx->read_ev_io->data);
 		FREE_AND_UNDEF(ami_ctx->read_ev_io);
-		trace("Unset events done\n");
 	}
+	if(LIKELY(DEFINED(ami_ctx->async_ev_w))) {
+		if (LIKELY(ev_async_pending(ami_ctx->async_ev_w))) {
+			ev_clear_pending(ami_ctx->loop, ami_ctx->async_ev_w);
+		}
+		if (LIKELY(ev_is_active(ami_ctx->async_ev_w))) {
+			ev_async_stop(ami_ctx->loop, ami_ctx->async_ev_w);
+		}
+		UNDEF(ami_ctx->async_ev_w->data);
+		FREE_AND_UNDEF(ami_ctx->async_ev_w);
+	}
+
+#ifdef DEBUG
+	trace("ami_ctx_stop_events end\n");
+#endif
+	return 0;
 }
 
-void ami_ctx_disconnect(AMIctx_t * ami_ctx)
+int ami_ctx_disconnect(AMIctx_t * ami_ctx)
 {
-	ami_ctx_disable_events(ami_ctx);
-
-	if (ami_ctx->sockfd != -1) {
-		trace("Shutdown socket fd:%i\n", ami_ctx->sockfd);
+	if (ami_ctx->sockfd > 0) {
 		fcntl(ami_ctx->sockfd, F_SETFL, 0);
+
 		if (shutdown(ami_ctx->sockfd, SHUT_RDWR) == -1) {
-			trace("SHUT_RDWR error fd:%i\n", ami_ctx->sockfd);
+			return ami_ctx->sockfd = -1;
 		}
+
 		if (close(ami_ctx->sockfd) == -1) {
-			trace("Close error fd:%i\n", ami_ctx->sockfd);
+			return ami_ctx->sockfd = -1;
 		}
+
 		ami_ctx->sockfd = -1;
-		ami_ctx_invoke_disconnect_callback(ami_ctx);
+	}
+	ami_ctx_invoke_disconnect_callback(ami_ctx);
+
+	return 0;
+}
+
+#define ami_ctx_fill_cb_packet(A_AMI_CTX, A_PACKET) \
+	hv_clear((A_AMI_CTX)->hv); \
+	for (AMIfield_t * packet_field = A_PACKET->head; packet_field; packet_field = packet_field->next) { \
+		(void)hv_store((A_AMI_CTX)->hv, packet_field->name->content, packet_field->name->len, newSVpvn(packet_field->value->content, packet_field->value->len), 0); \
+	}
+
+static void ami_ctx_ew_async_cb (struct ev_loop *loop, ev_async *w, int revents)
+{
+	dTHX;
+	AMIpkt_t * parsed_packet = NULL;
+#ifdef DEBUG
+	trace("EV async_cb get parsed AMI packets\n");
+	size_t processed = 0;
+#endif
+	while((parsed_packet = ami_ctx_ring_buffer_pop(((AMIctx_t *)w->data)->parsed_buffer))) {
+#ifdef DEBUG
+		processed++;
+#endif
+		ami_ctx_fill_cb_packet((AMIctx_t *)w->data, parsed_packet);
+		ami_ctx_invoke_event_callback((AMIctx_t *)w->data);
+		ami_ctx_pkt_destroy(parsed_packet);
+	}
+#ifdef DEBUG
+	trace("EV async_cb get parsed done: %lu packets\n", processed);
+#endif
+}
+
+#define ami_ctx_notify_parser_thread(A_AMI_CTX) \
+	pthread_mutex_lock((A_AMI_CTX)->parse_thread_cv_lock); \
+	pthread_cond_signal((A_AMI_CTX)->parse_thread_cv); \
+	pthread_mutex_unlock((A_AMI_CTX)->parse_thread_cv_lock)
+
+void ami_ctx_enqueue_packet_len (AMIctx_t * ami_ctx, size_t len)
+{
+	if (LIKELY(DEFINED(ami_ctx))) {
+		ami_ctx_assign_packet_buffer(ami_ctx, packet_buffer, len);
+		ami_ctx_ring_buffer_push(ami_ctx->parse_buffer, packet_buffer);
 	}
 }
 
-#define ami_ctx_enqueue_packet_len(A_AMI_CTX, A_LEN) \
-	hv_clear((A_AMI_CTX)->hv); \
-	ami_ctx_parse_buffer((A_AMI_CTX)->hv, (A_AMI_CTX)->buffer, A_LEN); \
-	ami_ctx_invoke_event_callback(A_AMI_CTX)
-
-#define ami_ctx_forward_buffer_cursor(A_AMI_CTX, A_LEN) \
-	(A_AMI_CTX)->buffer_len += A_LEN; \
-	(A_AMI_CTX)->buffer_cursor += A_LEN;
-
-//(A_AMI_CTX)->buffer_cursor = (A_AMI_CTX)->buffer + (A_AMI_CTX)->buffer_len;
-//	trace("AMI buffer after forward len: %lu\n", (A_AMI_CTX)->buffer_len)
-
-#define ami_ctx_rewind_buffer_cursor(A_AMI_CTX, A_LEN) \
-	memmove((A_AMI_CTX)->buffer, (A_AMI_CTX)->buffer + A_LEN, (A_AMI_CTX)->buffer_len - A_LEN); \
-	(A_AMI_CTX)->buffer_len -= A_LEN; \
-	(A_AMI_CTX)->buffer_cursor -= A_LEN;
-
-	//(A_AMI_CTX)->buffer_cursor = (A_AMI_CTX)->buffer + (A_AMI_CTX)->buffer_len;
-	//trace("AMI buffer after rewind len: %lu\n", (A_AMI_CTX)->buffer_len)
-
-#define ami_ctx_reset_buffer_cursor(A_AMI_CTX) \
-	(A_AMI_CTX)->buffer_len = 0; \
-	(A_AMI_CTX)->buffer_cursor = (A_AMI_CTX)->buffer; \
-	trace("AMI buffer reset\n")
-
-#define ami_ctx_feed_buffer(A_AMI_CTX) \
-	int64_t found = 0; \
-	dTHX; \
-	for(;;) { \
-		ami_ctx_scan_packet_end(A_AMI_CTX, found); \
-		if (found != -1) { \
-			STATS(A_AMI_CTX); \
-			buffer_dump("Detected AMI packet", (A_AMI_CTX)->buffer, found); \
-			if (UNLIKELY(ami_ctx_scan_filter(A_AMI_CTX))) { \
-				buffer_dump("AMI packet passed filter", (A_AMI_CTX)->buffer, found); \
-				ami_ctx_enqueue_packet_len(A_AMI_CTX, found); \
-			} \
-			if (UNLIKELY((A_AMI_CTX)->buffer_len == found)) { \
-				ami_ctx_reset_buffer_cursor(A_AMI_CTX); \
-			} else { \
-				ami_ctx_rewind_buffer_cursor(A_AMI_CTX, found); \
-			} \
-		} else break; \
+ssize_t ami_ctx_forward_buffer_cursor (AMIctx_t * ami_ctx, ssize_t len)
+{
+	if (LIKELY(DEFINED(ami_ctx))) {
+		ami_ctx->buffer_len += len;
+		ami_ctx->buffer_cursor = ami_ctx->buffer_head + ami_ctx->buffer_len;
+		ami_ctx->buffer_pos = (int)(ami_ctx->buffer_cursor - ami_ctx->buffer_head);
+		ami_ctx->buffer_free = BUFFER_SIZE - ami_ctx->buffer_pos;
+#ifdef DEBUG
+		trace("New AMI buffer after forward len: %lu, free memory: %lu\n", ami_ctx->buffer_len, ami_ctx->buffer_free);
+#endif
+		return ami_ctx->buffer_len;
 	}
+	return -1;
+}
+
+ssize_t ami_ctx_rewind_buffer_cursor (AMIctx_t * ami_ctx, ssize_t len)
+{
+	if (LIKELY(DEFINED(ami_ctx))) {
+#ifdef DEBUG
+		trace("Residual AMI buffer len: %lu\n", ami_ctx->buffer_len);
+#endif
+		memmove(ami_ctx->buffer_head, ami_ctx->buffer_head + len, ami_ctx->buffer_len - len);
+		ami_ctx->buffer_len -= len;
+		ami_ctx->buffer_cursor = ami_ctx->buffer_head + ami_ctx->buffer_len;
+		ami_ctx->buffer_pos = (int)(ami_ctx->buffer_cursor - ami_ctx->buffer_head);
+		ami_ctx->buffer_free = BUFFER_SIZE - ami_ctx->buffer_pos;
+#ifdef DEBUG
+		trace("New AMI buffer after rewind len: %lu, free memory: %lu\n", ami_ctx->buffer_len, ami_ctx->buffer_free);
+#endif
+		return ami_ctx->buffer_len;
+	}
+	return -1;
+}
+
+ssize_t ami_ctx_reset_buffer_cursor (AMIctx_t * ami_ctx)
+{
+	if (LIKELY(DEFINED(ami_ctx))) {
+		ami_ctx->buffer_len = 0;
+		ami_ctx->buffer_cursor = ami_ctx->buffer_head;
+		ami_ctx->buffer_pos = 0;
+		ami_ctx->buffer_free = BUFFER_SIZE;
+#ifdef DEBUG
+		trace("New AMI buffer after rewind len: %lu, free memory: %lu\n", ami_ctx->buffer_len, ami_ctx->buffer_free);
+#endif
+		return ami_ctx->buffer_len;
+	}
+	return -1;
+}
+
+bool ami_ctx_feed_buffer (AMIctx_t * ami_ctx)
+{
+	if (LIKELY(DEFINED(ami_ctx))) {
+		int64_t found = 0;
+		bool is_new_packets = false;
+		while((found = ami_ctx_scan_packet_end(ami_ctx)) > -1) {
+
+#ifdef DEBUG_STATS
+			if (ami_ctx->stat_packets > 0 && (ami_ctx->stat_packets % DEBUG_STATS == 0)) {
+				ami_ctx->time_end = clock();
+				ami_ctx->time_used = ((double) (ami_ctx->time_end - ami_ctx->time_start)) / CLOCKS_PER_SEC;
+				ami_ctx->time_start = clock();
+				fprintf(stderr, "Stats: packets=%lu, bytes=%lu, callbacks=%lu, seconds=%f, bps=%f, pps=%f\n", ami_ctx->stat_packets, ami_ctx->stat_bytes, ami_ctx->stat_callbacks, ami_ctx->time_used, ami_ctx->stat_bytes/ami_ctx->time_used, ami_ctx->stat_packets/ami_ctx->time_used);
+				STATz(ami_ctx, packets);
+				STATz(ami_ctx, bytes);
+				STATz(ami_ctx, callbacks);
+			}
+#endif
+
+#ifdef DEBUG
+			buffer_dump("Detected AMI packet", ami_ctx->buffer_head, found);
+#endif
+			if (UNLIKELY(ami_ctx_scan_filter(ami_ctx))) {
+#ifdef DEBUG
+				buffer_dump("AMI packet passed filter", ami_ctx->buffer_head, found);
+#endif
+
+#ifndef DEBUG_STATS
+				ami_ctx_enqueue_packet_len(ami_ctx, found);
+				is_new_packets = true;
+#endif
+			}
+
+			if (LIKELY(ami_ctx->buffer_len == found)) {
+				(void)ami_ctx_reset_buffer_cursor(ami_ctx);
+			} else {
+				(void)ami_ctx_rewind_buffer_cursor(ami_ctx, found);
+			}
+		}
+		return is_new_packets;
+	}
+	return false;
+}
 
 static void ami_ctx_ev_read_cb (struct ev_loop *loop, ev_io *w, int revents)
 {
 	AMIctx_t * ami_ctx = (AMIctx_t *)w->data;
 
-	if (UNLIKELY((BUFFER_SIZE - ami_ctx->buffer_len) <= 0)) {
-		trace("AMI buffer full\n");
-		ami_ctx_reset_buffer_cursor(ami_ctx);
-	}
+	if (LIKELY(DEFINED(ami_ctx))) {
+		if (UNLIKELY(revents & EV_ERROR && !(revents & EV_READ))) {
+#ifdef DEBUG
+			trace("EV error on read, fd=%d revents=0x%08x\n", ami_ctx->sockfd, revents);
+#endif
+			(void)ami_ctx_stop_events(ami_ctx);
+			(void)ami_ctx_disconnect(ami_ctx);
+			return;
+		}
 
-	if (UNLIKELY(revents & EV_ERROR && !(revents & EV_READ))) {
-		ami_ctx_set_error(ami_ctx, EAMI_FATAL, "AMI socket read error");
-		return;
-	}
-
-	ssize_t read_len = 0;
+		ssize_t read_len = 0;
 
 l_read:
-	read_len = read(ami_ctx->sockfd, ami_ctx->buffer_cursor, BUFFER_SIZE - ami_ctx->buffer_len);
+		//read_len = read(ami_ctx->sockfd, ami_ctx->buffer_cursor, min(PACKET_READ_BUFFER_SIZE, ami_ctx->buffer_free));
+		read_len = read(ami_ctx->sockfd, ami_ctx->buffer_cursor, ami_ctx->buffer_free);
 
-	if (UNLIKELY(read_len <= 0)) {
-		if (LIKELY(read_len == 0)) {
-			trace("EOF detected in fd: %d\n", ami_ctx->sockfd);
-			ami_ctx_set_error(ami_ctx, EAMI_NON_FATAL, "AMI socket read EOF");
-			return;
-		} else if (UNLIKELY(errno == EAGAIN || errno == EINTR)) {
-			trace("EAGAIN detected in fd: %d, status: %d \n", ami_ctx->sockfd, errno);
-			goto l_read;
+		if (UNLIKELY(read_len <= 0)) {
+			if (LIKELY(read_len == 0)) {
+#ifdef DEBUG
+				trace("EOF detected in fd: %d\n", ami_ctx->sockfd);
+#endif
+				(void)ami_ctx_stop_events(ami_ctx);
+				(void)ami_ctx_disconnect(ami_ctx);
+				return;
+			} else if (UNLIKELY(errno == EAGAIN || errno == EINTR)) {
+#ifdef DEBUG
+				trace("EAGAIN detected in fd: %d, status: %d \n", ami_ctx->sockfd, errno);
+#endif
+				goto l_read;
+			}
 		}
-	} else {
-		STATi(ami_ctx, bytes, read_len);
-		trace("Read AMI data fd:%i, len: %li\n", ami_ctx->sockfd, read_len);
-		ami_ctx_forward_buffer_cursor(ami_ctx, read_len);
-		ami_ctx_feed_buffer(ami_ctx);
+		else if (LIKELY(read_len > 0)) {
+			STATi(ami_ctx, bytes, read_len);
+#ifdef DEBUG
+			trace("Read AMI data fd:%i, len: %li\n", ami_ctx->sockfd, read_len);
+#endif
+			ami_ctx_forward_buffer_cursor(ami_ctx, read_len);
+			if (ami_ctx_feed_buffer(ami_ctx)) {
+				ami_ctx_notify_parser_thread(ami_ctx);
+			}
+		}
 	}
 }
 
@@ -987,47 +1168,91 @@ static void ami_ctx_ev_read_banner_cb (struct ev_loop *loop, ev_io *w, int reven
 {
 	AMIctx_t * ami_ctx = (AMIctx_t *)w->data;
 
-	if (UNLIKELY((BUFFER_SIZE - ami_ctx->buffer_len) <= 0)) {
-		trace("AMI buffer full\n");
-		ami_ctx_reset_buffer_cursor(ami_ctx);
-	}
+	if (LIKELY(DEFINED(ami_ctx))) {
+		if (UNLIKELY(revents & EV_ERROR && !(revents & EV_READ))) {
+#ifdef DEBUG
+			trace("EV banner error on read, fd=%d revents=0x%08x\n", ami_ctx->sockfd, revents);
+#endif
+			(void)ami_ctx_stop_events(ami_ctx);
+			(void)ami_ctx_disconnect(ami_ctx);
+			return;
+		}
 
-	if (UNLIKELY(revents & EV_ERROR && !(revents & EV_READ))) {
-		trace("EV banner error on read, fd=%d revents=0x%08x\n", ami_ctx->sockfd, revents);
-		ami_ctx_set_error(ami_ctx, EAMI_FATAL, "AMI socket read error");
-		return;
-	}
-
-	ssize_t read_len = 0;
+		ssize_t read_len = 0;
 
 l_read:
-	read_len = read(ami_ctx->sockfd, ami_ctx->buffer_cursor, BUFFER_SIZE - ami_ctx->buffer_len);
+		read_len = read(ami_ctx->sockfd, ami_ctx->buffer_cursor, ami_ctx->buffer_free);
 
-	if (UNLIKELY(read_len <= 0)) {
-		if (LIKELY(read_len == 0)) {
-			trace("EOF banner detected in fd: %i\n", ami_ctx->sockfd);
-			ami_ctx_set_error(ami_ctx, EAMI_NON_FATAL, "AMI socket read EOF");
-			return;
-		} else if (UNLIKELY(errno == EAGAIN || errno == EINTR)) {
-			trace("EAGAIN banner detected in fd: %d, status: %d \n", ami_ctx->sockfd, errno);
-			goto l_read;
+		if (UNLIKELY(read_len <= 0)) {
+			if (LIKELY(read_len == 0)) {
+#ifdef DEBUG
+				trace("EOF banner detected in fd: %i\n", ami_ctx->sockfd);
+#endif
+				(void)ami_ctx_stop_events(ami_ctx);
+				(void)ami_ctx_disconnect(ami_ctx);
+				return;
+			} else if (UNLIKELY(errno == EAGAIN || errno == EINTR)) {
+#ifdef DEBUG
+				trace("EAGAIN banner detected in fd: %d, status: %d \n", ami_ctx->sockfd, errno);
+#endif
+				goto l_read;
+			}
 		}
-	} else {
-		STATi(ami_ctx, bytes, read_len);
-		ami_ctx_forward_buffer_cursor(ami_ctx, read_len);
-		trace("Read AMI banner data fd: %i, len: %li\n", ami_ctx->sockfd, read_len);
-		buffer_dump("Read AMI banner data", ami_ctx->buffer, ami_ctx->buffer_len);
-
-		int64_t found = 0;
-		if (LIKELY((found = ami_ctx_scan_banner_end(ami_ctx)) > -1)) {
-			ami_ctx_unset_state(ami_ctx, SAMI_HANDSHAKE);
-			ami_ctx_set_state(ami_ctx, SAMI_READY);
-			buffer_dump("Found AMI banner", ami_ctx->buffer, found);
-			ami_ctx_reset_buffer_cursor(ami_ctx);
-			ev_set_cb (w, ami_ctx_ev_read_cb);
-			ami_ctx_invoke_connect_callback(ami_ctx);
+		else if (LIKELY(read_len > 0)) {
+			STATi(ami_ctx, bytes, read_len);
+			(void)ami_ctx_forward_buffer_cursor(ami_ctx, read_len);
+#ifdef DEBUG
+			trace("Read AMI banner data fd: %i, len: %li\n", ami_ctx->sockfd, read_len);
+			buffer_dump("Read AMI banner data", ami_ctx->buffer_head, ami_ctx->buffer_len);
+#endif
+			int64_t found = 0;
+			if (LIKELY((found = ami_ctx_scan_banner_end(ami_ctx)) > -1)) {
+#ifdef DEBUG
+				buffer_dump("Found AMI banner", ami_ctx->buffer_head, found);
+#endif
+				(void)ami_ctx_reset_buffer_cursor(ami_ctx);
+				ev_set_cb (w, ami_ctx_ev_read_cb);
+			}
 		}
 	}
+}
+
+void * ami_ctx_thread(void * ptr)
+{
+	AMIctx_t * ami_ctx = (AMIctx_t *)ptr;
+	AMIvalue_t * found_packet = NULL;
+	//AMIpkt_t * parsed_packet = NULL;
+	bool parsed = false;
+	if (LIKELY(DEFINED(ami_ctx))) {
+		for(;;) {
+			pthread_mutex_lock( ami_ctx->parse_thread_cv_lock );
+			parsed = false;
+			while((found_packet = (AMIvalue_t *)ami_ctx_ring_buffer_pop(ami_ctx->parse_buffer))) {
+#ifdef DEBUG
+				//trace("Thread message:\n");
+				//buffer_dump("Threaded packet", found_packet->content, found_packet->len);
+#endif
+				ami_ctx_parse_buffer(parsed_packet, found_packet);
+				if (LIKELY(DEFINED(parsed_packet))) {
+				//if(LIKELY((parsed_packet = ami_ctx_parse(found_packet)))) {
+#ifdef DEBUG
+					//trace("Thread message parsed\n");
+#endif
+					ami_ctx_ring_buffer_push(ami_ctx->parsed_buffer, (void *)parsed_packet);
+					parsed = true;
+				}
+				ami_ctx_value_destroy(found_packet);
+			}
+
+			if (LIKELY(parsed)) ev_async_send(ami_ctx->loop, ami_ctx->async_ev_w);
+			pthread_testcancel();
+			pthread_cond_wait(ami_ctx->parse_thread_cv, ami_ctx->parse_thread_cv_lock);
+			pthread_mutex_unlock(ami_ctx->parse_thread_cv_lock);
+		}
+		pthread_exit(ami_ctx);
+	}
+
+	return NULL;
 }
 
 int ami_ctx_setup_events(AMIctx_t * ami_ctx)
@@ -1035,11 +1260,18 @@ int ami_ctx_setup_events(AMIctx_t * ami_ctx)
 	if (LIKELY(DEFINED(ami_ctx))) {
 		if (LIKELY(ami_ctx->sockfd > 0)) {
 			if (LIKELY(ami_ctx->read_ev_io == NULL)) {
-				ami_ctx_set_state(ami_ctx, SAMI_HANDSHAKE);
 				ALLOC_MEM(ami_ctx->read_ev_io, 1, struct ev_io);
 				ev_io_init(ami_ctx->read_ev_io, ami_ctx_ev_read_banner_cb, ami_ctx->sockfd, EV_READ);
 				ami_ctx->read_ev_io->data = (void *)ami_ctx;
 				ev_io_start(ami_ctx->loop, ami_ctx->read_ev_io);
+
+				ALLOC_MEM(ami_ctx->async_ev_w, 1, struct ev_async);
+				ev_async_init (ami_ctx->async_ev_w, ami_ctx_ew_async_cb);
+				ami_ctx->async_ev_w->data = (void *)ami_ctx;
+				ev_async_start (ami_ctx->loop, ami_ctx->async_ev_w);
+
+				pthread_create (ami_ctx->parse_thread_id, NULL, ami_ctx_thread, (void *)ami_ctx);
+				pthread_detach (*ami_ctx->parse_thread_id);
 			}
 		} else {
 			return -1;
@@ -1048,45 +1280,72 @@ int ami_ctx_setup_events(AMIctx_t * ami_ctx)
 	return 0;
 }
 
-bool ami_ctx_connect(AMIctx_t * ami_ctx)
+int ami_ctx_connect(AMIctx_t * ami_ctx)
 {
 	if (LIKELY(DEFINED(ami_ctx))) {
-		ami_ctx_unset_state(ami_ctx, SAMI_CONNECTED);
-		ami_ctx_set_state(ami_ctx, SAMI_CONNECTING);
-		static int opt_nonblock_flag = O_NONBLOCK;
-		static int opt_enable_flag = 1;
-		static struct linger opt_linger = { .l_onoff = 0, .l_linger = 0 };
+		int flags;
+		struct linger linger = { .l_onoff = 0, .l_linger = 0 };
 
 		ami_ctx->sockfd = socket(AF_INET, SOCK_STREAM, 0);
 
 		if (ami_ctx->sockfd < 0) {
-			ami_ctx_set_error(ami_ctx, EAMI_FATAL, "Opening socket");
-		} else if (connect(ami_ctx->sockfd, (struct sockaddr *)&(ami_ctx->serv_addr), sizeof(ami_ctx->serv_addr)) < 0) {
-			ami_ctx_set_error(ami_ctx, EAMI_FATAL, "Setup connection");
-		} else if (fcntl(ami_ctx->sockfd, F_SETFL, opt_nonblock_flag) < 0) {
-			ami_ctx_set_error(ami_ctx, EAMI_FATAL, "Setting O_NONBLOCK option");
-		} else if (setsockopt(ami_ctx->sockfd, SOL_TCP, TCP_NODELAY, &opt_enable_flag, sizeof(int))) {
-			ami_ctx_set_error(ami_ctx, EAMI_FATAL, "Setting TCP_NODELAY option");
-		} else if (setsockopt(ami_ctx->sockfd, SOL_SOCKET, SO_OOBINLINE, &opt_enable_flag, sizeof(int))) {
-			ami_ctx_set_error(ami_ctx, EAMI_FATAL, "Setting SO_OOBINLINE option");
-		} else if (setsockopt(ami_ctx->sockfd, SOL_SOCKET, SO_LINGER, &opt_linger, sizeof(opt_linger))) {
-			ami_ctx_set_error(ami_ctx, EAMI_FATAL, "Setting SO_LINGER option");
-		} else {
-			ami_ctx_unset_state(ami_ctx, SAMI_CONNECTING);
-			ami_ctx_set_state(ami_ctx, SAMI_CONNECTED);
-			return true;
+#ifdef DEBUG
+			trace("ERROR opening socket\n");
+#endif
+			ami_ctx_invoke_connect_error_callback(ami_ctx);
+
+			return ami_ctx->sockfd = -1;
 		}
 
-		ami_ctx_unset_state(ami_ctx, SAMI_CONNECTING);
-
-		if (ami_ctx->sockfd > 0) {
+		if (connect(ami_ctx->sockfd, (struct sockaddr *)&(ami_ctx->serv_addr), sizeof(ami_ctx->serv_addr)) < 0) {
+#ifdef DEBUG
+			trace("ERROR connecting\n");
+#endif
 			close(ami_ctx->sockfd);
-			ami_ctx->sockfd = -1;
-		}
-		ami_ctx_invoke_connect_error_callback(ami_ctx);
-	}
 
-	return false;
+			ami_ctx_invoke_connect_error_callback(ami_ctx);
+
+			return ami_ctx->sockfd = -1;
+		}
+
+		flags = O_NONBLOCK;
+		if (fcntl(ami_ctx->sockfd, F_SETFL, flags) < 0) {
+			close(ami_ctx->sockfd);
+
+			ami_ctx_invoke_connect_error_callback(ami_ctx);
+
+			return ami_ctx->sockfd = -1;
+		}
+
+		flags = 1;
+		if (setsockopt(ami_ctx->sockfd, SOL_TCP, TCP_NODELAY, &flags, sizeof(int))) {
+			close(ami_ctx->sockfd);
+
+			ami_ctx_invoke_connect_error_callback(ami_ctx);
+
+			return ami_ctx->sockfd = -1;
+		}
+
+		flags = 1;
+		if (setsockopt(ami_ctx->sockfd, SOL_SOCKET, SO_OOBINLINE, &flags, sizeof(int))) {
+			close(ami_ctx->sockfd);
+
+			ami_ctx_invoke_connect_error_callback(ami_ctx);
+
+			return ami_ctx->sockfd = -1;
+		}
+
+		if (setsockopt(ami_ctx->sockfd, SOL_SOCKET, SO_LINGER, &linger, sizeof(linger))) {
+			close(ami_ctx->sockfd);
+
+			ami_ctx_invoke_connect_error_callback(ami_ctx);
+
+			return ami_ctx->sockfd = -1;
+		}
+
+		ami_ctx_invoke_connect_callback(ami_ctx);
+	}
+	return 0;
 }
 
 int ami_ctx_fd(AMIctx_t * ami_ctx)
@@ -1125,12 +1384,22 @@ void ami_ctx_destroy (AMIctx_t * ami_ctx)
 #ifdef DEBUG
 		trace("ami_ctx_destroy begin\n");
 #endif
-		ami_ctx_unset_events(ami_ctx);
-		ami_ctx_disconnect(ami_ctx);
+		(void)ami_ctx_stop_events(ami_ctx);
+		(void)ami_ctx_disconnect(ami_ctx);
+
+		pthread_mutex_destroy(ami_ctx->parse_thread_cv_lock);
+		pthread_cond_destroy(ami_ctx->parse_thread_cv);
+
+		FREE_AND_UNDEF(ami_ctx->parse_thread_cv_lock);
+		FREE_AND_UNDEF(ami_ctx->parse_thread_cv);
+		FREE_AND_UNDEF(ami_ctx->parse_thread_id);
 
 		FREE_AND_UNDEF(ami_ctx->buffer);
 
 		ami_ctx_field_destroy(ami_ctx->last_event);
+
+		ami_ctx_ring_buffer_destroy(ami_ctx->parse_buffer);
+		ami_ctx_ring_buffer_destroy(ami_ctx->parsed_buffer);
 
 		if (ami_ctx->sockfd > 0) {
 			close(ami_ctx->sockfd);
@@ -1149,13 +1418,15 @@ void ami_ctx_destroy (AMIctx_t * ami_ctx)
 
 		dTHX;
 		hv_undef(ami_ctx->hv);
-		UNDEF(ami_ctx->hv);
+		ami_ctx->hv = NULL;
 		sv_unref(ami_ctx->packet);
-		UNDEF(ami_ctx->packet);
+		ami_ctx->packet = NULL;
 
 		FREE_AND_UNDEF(ami_ctx);
 	}
+#ifdef DEBUG
 	trace("ami_ctx_destroy done\n");
+#endif
 }
 
 MODULE = Thirdlane::AMI::XS		PACKAGE = AMIctx_tPtr  PREFIX = AMIctx_t_
@@ -1177,71 +1448,28 @@ PROTOTYPES: DISABLE
 BOOT:
 	{
 		I_EV_API("Thirdlane::AMI::XS");
-	}
+		}
 
 AMIctx_t *
-ami_init(IN loop)
+ami_connect(IN loop, IN host, IN port, IN on_event_callback)
 	struct ev_loop * loop
+	const AMIcpbuff_t host
+	const AMIcpbuff_t port
+	SV * on_event_callback
 	INIT:
 		AMIctx_t * ami_ctx = ami_ctx_init();
 	CODE:
 		(void)ami_ctx_loop(ami_ctx, loop);
+		(void)ami_ctx_host(ami_ctx, host, port);
+		if (ami_ctx_connect(ami_ctx) > -1) {
+			(void)ami_ctx_setup_events(ami_ctx);
+			ami_ctx_set_event_callback(ami_ctx, on_event_callback);
+		} else {
+		}
+
 		RETVAL = ami_ctx;
 	OUTPUT:
 		RETVAL
-
-void
-ami_connect(IN ami_ctx, IN host, IN port)
-	AMIctx_t * ami_ctx
-	const AMIcpbuff_t host
-	const AMIcpbuff_t port
-	CODE:
-		(void)ami_ctx_host(ami_ctx, host, port);
-		if (ami_ctx_connect(ami_ctx)) {
-			ami_ctx_setup_events(ami_ctx);
-		}
-
-void
-ami_on_event(IN ami_ctx, IN callback)
-	AMIctx_t * ami_ctx
-	SV * callback
-	CODE:
-		ami_ctx_set_event_callback(ami_ctx, callback);
-
-void
-ami_on_connect(IN ami_ctx, IN callback)
-	AMIctx_t * ami_ctx
-	SV * callback
-	CODE:
-		ami_ctx_set_connect_callback(ami_ctx, callback);
-
-void
-ami_on_error(IN ami_ctx, IN callback)
-	AMIctx_t * ami_ctx
-	SV * callback
-	CODE:
-		ami_ctx_set_error_callback(ami_ctx, callback);
-
-void
-ami_on_disconnect(IN ami_ctx, IN callback)
-	AMIctx_t * ami_ctx
-	SV * callback
-	CODE:
-		ami_ctx_set_disconnect_callback(ami_ctx, callback);
-
-void
-ami_on_connect_error(IN ami_ctx, IN callback)
-	AMIctx_t * ami_ctx
-	SV * callback
-	CODE:
-		ami_ctx_set_connect_error_callback(ami_ctx, callback);
-
-void
-ami_on_timeout(IN ami_ctx, IN callback)
-	AMIctx_t * ami_ctx
-	SV * callback
-	CODE:
-		ami_ctx_set_timeout_callback(ami_ctx, callback);
 
 int
 ami_fd(IN ami_ctx)
